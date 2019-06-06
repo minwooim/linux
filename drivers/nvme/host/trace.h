@@ -16,6 +16,12 @@
 
 #include "nvme.h"
 
+const char *nvme_trace_parse_common(struct trace_seq *p,
+		struct nvme_command *cmd);
+
+#define parse_nvme_common(cmd)					\
+	nvme_trace_parse_common(p, cmd)
+
 const char *nvme_trace_parse_admin_cmd(struct trace_seq *p, u8 opcode,
 		u8 *cdw10);
 const char *nvme_trace_parse_nvm_cmd(struct trace_seq *p, u8 opcode,
@@ -48,34 +54,30 @@ TRACE_EVENT(nvme_setup_cmd,
 	    TP_PROTO(struct request *req, struct nvme_command *cmd),
 	    TP_ARGS(req, cmd),
 	    TP_STRUCT__entry(
+		__field(struct nvme_command *, cmd)
 		__array(char, disk, DISK_NAME_LEN)
 		__field(int, ctrl_id)
 		__field(int, qid)
 		__field(u8, opcode)
-		__field(u8, flags)
 		__field(u8, fctype)
 		__field(u16, cid)
-		__field(u32, nsid)
-		__field(u64, metadata)
 		__array(u8, cdw10, 24)
 	    ),
 	    TP_fast_assign(
+		__entry->cmd = cmd;
 		__entry->ctrl_id = nvme_req(req)->ctrl->instance;
 		__entry->qid = nvme_req_qid(req);
 		__entry->opcode = cmd->common.opcode;
-		__entry->flags = cmd->common.flags;
 		__entry->cid = le16_to_cpu(cmd->common.command_id);
-		__entry->nsid = le32_to_cpu(cmd->common.nsid);
-		__entry->metadata = le64_to_cpu(cmd->common.metadata);
 		__entry->fctype = cmd->fabrics.fctype;
 		__assign_disk_name(__entry->disk, req->rq_disk);
 		memcpy(__entry->cdw10, &cmd->common.cdw10,
 			sizeof(__entry->cdw10));
 	    ),
-	    TP_printk("nvme%d: %sqid=%d, cmdid=%u, nsid=%u, flags=0x%x, meta=0x%llx, cmd=(%s %s)",
+	    TP_printk("nvme%d: %sqid=%d, cmdid=%u%s cmd=(%s %s)",
 		      __entry->ctrl_id, __print_disk_name(__entry->disk),
-		      __entry->qid, __entry->cid, __entry->nsid,
-		      __entry->flags, __entry->metadata,
+		      __entry->qid, __entry->cid,
+		      parse_nvme_common(__entry->cmd),
 		      show_opcode_name(__entry->qid, __entry->opcode,
 				__entry->fctype),
 		      parse_nvme_cmd(__entry->qid, __entry->opcode,

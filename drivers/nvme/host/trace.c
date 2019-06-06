@@ -213,4 +213,24 @@ const char *nvme_trace_disk_name(struct trace_seq *p, char *name)
 	return ret;
 }
 
+const char *nvme_trace_parse_common(struct trace_seq *p,
+				    struct nvme_command *cmd)
+{
+	const char *ret = trace_seq_buffer_ptr(p);
+
+	/*
+	 * Fabrics command capsule does not have the following fields which
+	 * is for !fabrics commands.
+	 */
+	if (!nvme_is_fabrics(cmd)) {
+		trace_seq_printf(p, ", nsid=%#x, flags=%#x, meta=%#llx",
+				le32_to_cpu(cmd->common.nsid),
+				cmd->common.flags,
+				le64_to_cpu(cmd->common.metadata));
+	}
+	trace_seq_putc(p, 0);
+
+	return ret;
+}
+
 EXPORT_TRACEPOINT_SYMBOL_GPL(nvme_sq);
