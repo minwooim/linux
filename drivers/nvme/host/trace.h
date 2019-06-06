@@ -59,7 +59,7 @@ TRACE_EVENT(nvme_setup_cmd,
 		__entry->qid = nvme_req_qid(req);
 		__entry->opcode = cmd->common.opcode;
 		__entry->flags = cmd->common.flags;
-		__entry->cid = cmd->common.command_id;
+		__entry->cid = le16_to_cpu(cmd->common.command_id);
 		__entry->nsid = le32_to_cpu(cmd->common.nsid);
 		__entry->metadata = le64_to_cpu(cmd->common.metadata);
 		__assign_disk_name(__entry->disk, req->rq_disk);
