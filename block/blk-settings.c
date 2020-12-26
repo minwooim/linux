@@ -328,6 +328,13 @@ EXPORT_SYMBOL(blk_queue_max_segment_size);
 void blk_queue_logical_block_size(struct request_queue *q, unsigned int size)
 {
 	struct queue_limits *limits = &q->limits;
+	struct block_device *bdev;
+
+	if (q->backing_dev_info && q->backing_dev_info->owner &&
+			limits->logical_block_size != size) {
+		bdev = blkdev_get_no_open(q->backing_dev_info->owner->devt);
+		bdev->bd_disk->flags |= GENHD_FL_BLOCK_SIZE_CHANGED;
+	}
 
 	limits->logical_block_size = size;
 

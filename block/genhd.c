@@ -81,6 +81,7 @@ bool set_capacity_and_notify(struct gendisk *disk, sector_t size)
 	 */
 	if (!capacity || !size)
 		return false;
+
 	kobject_uevent_env(&disk_to_dev(disk)->kobj, KOBJ_CHANGE, envp);
 	return true;
 }
