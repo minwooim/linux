@@ -44,6 +44,10 @@ static unsigned char shutdown_timeout = 5;
 module_param(shutdown_timeout, byte, 0644);
 MODULE_PARM_DESC(shutdown_timeout, "timeout in seconds for controller shutdown");
 
+static bool command_retry;
+module_param(command_retry, bool, 0644);
+MODULE_PARM_DESC(command_retry, "retry commands up to nvme_max_retries");
+
 static u8 nvme_max_retries = 5;
 module_param_named(max_retries, nvme_max_retries, byte, 0644);
 MODULE_PARM_DESC(max_retries, "max number of retries a command may have");
@@ -560,7 +564,8 @@ static inline void nvme_init_request(struct request *req,
 	else /* no queuedata implies admin queue */
 		req->timeout = NVME_ADMIN_TIMEOUT;
 
-	req->cmd_flags |= REQ_FAILFAST_DRIVER;
+	if (!command_retry)
+		req->cmd_flags |= REQ_FAILFAST_DRIVER;
 	nvme_clear_nvme_request(req);
 	nvme_req(req)->cmd = cmd;
 }
