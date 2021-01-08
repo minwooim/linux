@@ -2501,7 +2501,7 @@ static int nvme_configure_acre(struct nvme_ctrl *ctrl)
 	int ret;
 
 	/* Don't bother enabling the feature if retry delay is not reported */
-	if (!ctrl->crdt[0])
+	if (!ctrl->crdt[0] && !ctrl->crdt[1] && !ctrl->crdt[2])
 		return 0;
 
 	host = kzalloc(sizeof(*host), GFP_KERNEL);
