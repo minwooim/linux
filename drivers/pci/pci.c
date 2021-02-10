@@ -48,6 +48,8 @@ EXPORT_SYMBOL(pci_pci_problems);
 
 unsigned int pci_pm_d3hot_delay;
 
+static void __pci_set_master(struct pci_dev *dev, bool enable,
+			     bool update_bme);
 static void pci_pme_list_scan(struct work_struct *work);
 
 static LIST_HEAD(pci_pme_list);
@@ -2101,13 +2103,7 @@ void __weak pcibios_penalize_isa_irq(int irq, int active) {}
 
 static void do_pci_disable_device(struct pci_dev *dev)
 {
-	u16 pci_command;
-
-	pci_read_config_word(dev, PCI_COMMAND, &pci_command);
-	if (pci_command & PCI_COMMAND_MASTER) {
-		pci_command &= ~PCI_COMMAND_MASTER;
-		pci_write_config_word(dev, PCI_COMMAND, pci_command);
-	}
+	__pci_set_master(dev, false, false);
 
 	pcibios_disable_device(dev);
 }
@@ -4244,7 +4240,7 @@ void __iomem *devm_pci_remap_cfg_resource(struct device *dev,
 }
 EXPORT_SYMBOL(devm_pci_remap_cfg_resource);
 
-static void __pci_set_master(struct pci_dev *dev, bool enable)
+static void __pci_set_master(struct pci_dev *dev, bool enable, bool update_bme)
 {
 	u16 old_cmd, cmd;
 
@@ -4258,7 +4254,9 @@ static void __pci_set_master(struct pci_dev *dev, bool enable)
 			enable ? "enabling" : "disabling");
 		pci_write_config_word(dev, PCI_COMMAND, cmd);
 	}
-	dev->is_busmaster = enable;
+
+	if (update_bme)
+		dev->is_busmaster = enable;
 }
 
 /**
@@ -4309,7 +4307,7 @@ void __weak pcibios_set_master(struct pci_dev *dev)
  */
 void pci_set_master(struct pci_dev *dev)
 {
-	__pci_set_master(dev, true);
+	__pci_set_master(dev, true, true);
 	pcibios_set_master(dev);
 }
 EXPORT_SYMBOL(pci_set_master);
@@ -4320,7 +4318,7 @@ EXPORT_SYMBOL(pci_set_master);
  */
 void pci_clear_master(struct pci_dev *dev)
 {
-	__pci_set_master(dev, false);
+	__pci_set_master(dev, false, true);
 }
 EXPORT_SYMBOL(pci_clear_master);
 
