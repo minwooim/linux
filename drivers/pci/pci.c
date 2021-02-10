@@ -2101,15 +2101,10 @@ void __weak pcibios_disable_device(struct pci_dev *dev) {}
  */
 void __weak pcibios_penalize_isa_irq(int irq, int active) {}
 
+static void __pci_set_master(struct pci_dev *dev, bool enable);
 static void do_pci_disable_device(struct pci_dev *dev)
 {
-	u16 pci_command;
-
-	pci_read_config_word(dev, PCI_COMMAND, &pci_command);
-	if (pci_command & PCI_COMMAND_MASTER) {
-		pci_command &= ~PCI_COMMAND_MASTER;
-		pci_write_config_word(dev, PCI_COMMAND, pci_command);
-	}
+	__pci_set_master(dev, false);
 
 	pcibios_disable_device(dev);
 }
