@@ -112,6 +112,18 @@ TRACE_EVENT(nvme_complete_rq,
 
 );
 
+TRACE_EVENT(nvme_async_event_req,
+	TP_PROTO(struct nvme_ctrl *ctrl),
+	TP_ARGS(ctrl),
+	TP_STRUCT__entry(
+		__field(int, ctrl_id)
+	),
+	TP_fast_assign(
+		__entry->ctrl_id = ctrl->instance;
+	),
+	TP_printk("nvme%d: NVME_AER", __entry->ctrl_id)
+);
+
 #define aer_name(aer) { aer, #aer }
 
 TRACE_EVENT(nvme_async_event,

@@ -4321,6 +4321,7 @@ static void nvme_async_event_work(struct work_struct *work)
 		container_of(work, struct nvme_ctrl, async_event_work);
 
 	nvme_aen_uevent(ctrl);
+	trace_nvme_async_event_req(ctrl);
 	ctrl->ops->submit_async_event(ctrl);
 }
 
