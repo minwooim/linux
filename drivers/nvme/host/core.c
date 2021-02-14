@@ -1707,6 +1707,35 @@ static int nvme_user_cmd64(struct nvme_ctrl *ctrl, struct nvme_ns *ns,
 	return status;
 }
 
+#ifdef CONFIG_NVME_MULTIPATH
+static int nvme_dev_mpath_cmd(struct nvme_ctrl *ctrl,
+		struct nvme_passthru_cmd __user *ucmd)
+{
+	struct nvme_passthru_cmd cmd;
+	struct nvme_ns *ns;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EACCES;
+	if (copy_from_user(&cmd, ucmd, sizeof(cmd)))
+			return -EFAULT;
+
+	ns = nvme_find_get_ns(ctrl, cmd.nsid);
+	if (unlikely(!ns))
+		return -EINVAL;
+	if (WARN_ON_ONCE(!(ns->disk->flags & GENHD_FL_HIDDEN)))
+		return -EINVAL;
+
+	return nvme_user_cmd(ctrl, ns, ucmd);
+}
+#else
+static int nvme_dev_mpath_cmd(struct nvme_ctrl *ctrl,
+		struct nvme_passthru_cmd32 __user *ucmd)
+{
+	dev_warn(ctrl->device, "CONFIG_NVME_MULTIPATH should be enabled\n");
+	return -EINVAL;
+}
+#endif
+
 /*
  * Issue ioctl requests on the first available path.  Note that unlike normal
  * block layer requests we will not retry failed request on another controller.
@@ -3329,6 +3358,8 @@ static long nvme_dev_ioctl(struct file *file, unsigned int cmd,
 		return nvme_user_cmd64(ctrl, NULL, argp);
 	case NVME_IOCTL_IO_CMD:
 		return nvme_dev_user_cmd(ctrl, argp);
+	case NVME_IOCTL_MPATH_IO:
+		return nvme_dev_mpath_cmd(ctrl, argp);
 	case NVME_IOCTL_RESET:
 		dev_warn(ctrl->device, "resetting controller\n");
 		return nvme_reset_ctrl_sync(ctrl);

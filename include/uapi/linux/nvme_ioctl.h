@@ -78,5 +78,6 @@ struct nvme_passthru_cmd64 {
 #define NVME_IOCTL_RESCAN	_IO('N', 0x46)
 #define NVME_IOCTL_ADMIN64_CMD	_IOWR('N', 0x47, struct nvme_passthru_cmd64)
 #define NVME_IOCTL_IO64_CMD	_IOWR('N', 0x48, struct nvme_passthru_cmd64)
+#define NVME_IOCTL_MPATH_IO	_IOWR('N', 0x49, struct nvme_passthru_cmd)
 
 #endif /* _UAPI_LINUX_NVME_IOCTL_H */
