@@ -447,9 +447,9 @@ struct nvme_ns {
 #define NVME_NS_DEAD     	1
 #define NVME_NS_ANA_PENDING	2
 #define NVME_NS_FORCE_RO	3
+#define NVME_NS_NOT_ACTIVE	4
 
 	struct nvme_fault_inject fault_inject;
-
 };
 
 /* NVMe ns supports metadata actions by the controller (generate/strip) */

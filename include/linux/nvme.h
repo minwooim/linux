@@ -1231,6 +1231,16 @@ struct nvme_directive_cmd {
 	__u32			rsvd16[3];
 };
 
+struct nvme_ns_attach {
+	__u8			opcode;
+	__u8			flags;
+	__u16			command_id;
+	__le32			nsid;
+	__u32			rsvd2[8];
+	__le32			sel;
+	__u32			rsvd11[5];
+};
+
 /*
  * Fabrics subcommands.
  */
@@ -1417,6 +1427,7 @@ struct nvme_command {
 		struct nvmf_property_get_command prop_get;
 		struct nvme_dbbuf dbbuf;
 		struct nvme_directive_cmd directive;
+		struct nvme_ns_attach ns_attach;
 	};
 };
 

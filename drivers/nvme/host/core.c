@@ -304,6 +304,9 @@ static inline enum nvme_disposition nvme_decide_disposition(struct request *req)
 	if (likely(nvme_req(req)->status == 0))
 		return COMPLETE;
 
+	if (test_bit(NVME_NS_NOT_ACTIVE, &((struct nvme_ns *) req->q->queuedata)->flags))
+		return FAILOVER;
+
 	if (blk_noretry_request(req) ||
 	    (nvme_req(req)->status & NVME_SC_DNR) ||
 	    nvme_req(req)->retries >= nvme_max_retries)
@@ -311,7 +314,8 @@ static inline enum nvme_disposition nvme_decide_disposition(struct request *req)
 
 	if (req->cmd_flags & REQ_NVME_MPATH) {
 		if (nvme_is_path_error(nvme_req(req)->status) ||
-		    blk_queue_dying(req->q))
+		    blk_queue_dying(req->q) ||
+		    test_bit(NVME_NS_NOT_ACTIVE, &((struct nvme_ns *) req->q->queuedata)->flags))
 			return FAILOVER;
 	} else {
 		if (blk_queue_dying(req->q))
@@ -1092,6 +1096,42 @@ static void nvme_passthru_end(struct nvme_ctrl *ctrl, u32 effects)
 	}
 }
 
+static void nvme_detach_ns(struct request *rq, char *buf)
+{
+	struct nvme_ctrl *ctrl = nvme_req(rq)->ctrl;
+	struct nvme_command *cmd = nvme_req(rq)->cmd;
+	struct nvme_ns *ns;
+	bool detach = le32_to_cpu(cmd->ns_attach.sel) & 1;
+	u16 *nr_ids = (u16 *) &buf[0];
+	u16 *ids = (u16 *) &buf[1];
+	u32 nsid = le32_to_cpu(cmd->ns_attach.nsid);
+	struct nvme_ctrl *c;
+	int i;
+
+	if (nvme_req(rq)->status)
+		return;
+	if (!detach)
+		return;	
+	if (!buf)
+		return;
+
+	for (i = 0; i < *nr_ids; i++) {
+		list_for_each_entry(c, &ctrl->subsys->ctrls, subsys_entry) {
+			if (c->cntlid != ids[i])
+				continue;
+
+			ns = nvme_find_get_ns(c, nsid);
+			if (!ns) {
+				continue;
+			}
+
+			set_bit(NVME_NS_NOT_ACTIVE, &ns->flags);
+		}
+	}
+
+	kfree(buf);
+}
+
 void nvme_execute_passthru_rq(struct request *rq)
 {
 	struct nvme_command *cmd = nvme_req(rq)->cmd;
@@ -1099,10 +1139,20 @@ void nvme_execute_passthru_rq(struct request *rq)
 	struct nvme_ns *ns = rq->q->queuedata;
 	struct gendisk *disk = ns ? ns->disk : NULL;
 	u32 effects;
+	void *buf;
+
+	if (!ns && cmd->common.opcode == nvme_admin_ns_attach) {
+		buf = kmalloc(4096, GFP_KERNEL);
+		if (buf)
+			memcpy(buf, bio_data(rq->bio), 4096);
+	}
 
 	effects = nvme_passthru_start(ctrl, ns, cmd->common.opcode);
 	blk_execute_rq(rq->q, disk, rq, 0);
 	nvme_passthru_end(ctrl, effects);
+
+	if (!ns && cmd->common.opcode == nvme_admin_ns_attach)
+		nvme_detach_ns(rq, buf);
 }
 EXPORT_SYMBOL_NS_GPL(nvme_execute_passthru_rq, NVME_TARGET_PASSTHRU);
 
@@ -4717,6 +4767,7 @@ static inline void _nvme_check_size(void)
 	BUILD_BUG_ON(sizeof(struct nvme_smart_log) != 512);
 	BUILD_BUG_ON(sizeof(struct nvme_dbbuf) != 64);
 	BUILD_BUG_ON(sizeof(struct nvme_directive_cmd) != 64);
+	BUILD_BUG_ON(sizeof(struct nvme_ns_attach) != 64);
 }
 
 
