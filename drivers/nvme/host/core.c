@@ -92,6 +92,9 @@ static struct class *nvme_subsys_class;
 static void nvme_put_subsystem(struct nvme_subsystem *subsys);
 static void nvme_remove_invalid_namespaces(struct nvme_ctrl *ctrl,
 					   unsigned nsid);
+static void nvme_ns_remove(struct nvme_ns *ns);
+static struct nvme_ns *nvme_find_get_ns_by_disk_name(struct nvme_ctrl *ctrl,
+						     const char *disk_name);
 
 /*
  * Prepare a queue for teardown.
@@ -3684,6 +3687,142 @@ static ssize_t nvme_ctrl_reconnect_delay_store(struct device *dev,
 static DEVICE_ATTR(reconnect_delay, S_IRUGO | S_IWUSR,
 	nvme_ctrl_reconnect_delay_show, nvme_ctrl_reconnect_delay_store);
 
+static int __nvme_ns_detach(struct nvme_ctrl *ctrl, unsigned int nsid)
+{
+	struct nvme_command c = { };
+	int err;
+	u16 *buf;
+
+	c.ns_attach.opcode = nvme_admin_ns_attach;
+	c.ns_attach.nsid = cpu_to_le32(nsid);
+	c.ns_attach.sel = cpu_to_le32(0x1);
+
+	buf = kmalloc(4096, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	buf[0] = cpu_to_le32(0x1);
+	buf[1] = cpu_to_le32(ctrl->cntlid);
+
+	err = nvme_submit_sync_cmd(ctrl->admin_q, &c, buf, 4096);
+	if (err) {
+		kfree(buf);
+		return err;
+	}
+
+	kfree(buf);
+	return 0;
+}
+
+static int nvme_ns_detach(struct nvme_ctrl *ctrl, struct nvme_ns *ns)
+{
+	int err;
+
+	blk_mq_quiesce_queue(ns->queue);
+
+	err = __nvme_ns_detach(ctrl, ns->head->ns_id);
+	if (err) {
+		blk_mq_unquiesce_queue(ns->queue);
+		return err;
+	}
+
+	nvme_set_queue_dying(ns);
+	nvme_ns_remove(ns);
+
+	return 0;
+}
+
+static int __nvme_ns_attach(struct nvme_ctrl *ctrl, unsigned int nsid)
+{
+	struct nvme_command c = { };
+	int err;
+	u16 *buf;
+
+	c.ns_attach.opcode = nvme_admin_ns_attach;
+	c.ns_attach.nsid = cpu_to_le32(nsid);
+	c.ns_attach.sel = cpu_to_le32(0x0);
+
+	buf = kmalloc(4096, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	buf[0] = cpu_to_le32(0x1);
+	buf[1] = cpu_to_le32(ctrl->cntlid);
+
+	err = nvme_submit_sync_cmd(ctrl->admin_q, &c, buf, 4096);
+	if (err) {
+		kfree(buf);
+		return err;
+	}
+
+	kfree(buf);
+	return 0;
+}
+
+static int nvme_ns_attach(struct nvme_ctrl *ctrl, unsigned int nsid, bool scan)
+{
+	int err;
+
+	if (!(ctrl->oacs & NVME_CTRL_OACS_NS_MANAGEMENT))
+		return -EOPNOTSUPP;
+
+	err = __nvme_ns_attach(ctrl, nsid);
+	if (err)
+		return err;
+
+	if (scan)
+		nvme_queue_scan(ctrl);
+
+	return 0;
+}
+
+static ssize_t nvme_ctrl_detach_ns(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+	struct nvme_ns *ns;
+	int err;
+
+	if (!(ctrl->oacs & NVME_CTRL_OACS_NS_MANAGEMENT))
+		return -EOPNOTSUPP;
+
+	ns = nvme_find_get_ns_by_disk_name(ctrl, buf);
+	if (!ns)
+		return -EINVAL;
+
+	err = nvme_ns_detach(ctrl, ns);
+	if (err) {
+		nvme_put_ns(ns);
+		return err;
+	}
+
+	nvme_put_ns(ns);
+	return count;
+}
+static DEVICE_ATTR(detach_ns, S_IWUSR, NULL, nvme_ctrl_detach_ns);
+
+static ssize_t nvme_ctrl_attach_ns(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+	unsigned int nsid;
+	int err;
+
+	/*
+	 * 'nsid' is device namespace id which is reported by NVMe controller.
+	 */
+	err = kstrtou32(buf, 10, &nsid);
+	if (err)
+		return err;
+
+	err = nvme_ns_attach(ctrl, nsid, true);
+	if (err)
+		return err;
+
+	return count;
+}
+static DEVICE_ATTR(attach_ns, S_IWUSR, NULL, nvme_ctrl_attach_ns);
+
 static struct attribute *nvme_dev_attrs[] = {
 	&dev_attr_reset_controller.attr,
 	&dev_attr_rescan_controller.attr,
@@ -3703,6 +3842,8 @@ static struct attribute *nvme_dev_attrs[] = {
 	&dev_attr_hostid.attr,
 	&dev_attr_ctrl_loss_tmo.attr,
 	&dev_attr_reconnect_delay.attr,
+	&dev_attr_detach_ns.attr,
+	&dev_attr_attach_ns.attr,
 	NULL
 };
 
@@ -3901,6 +4042,25 @@ struct nvme_ns *nvme_find_get_ns(struct nvme_ctrl *ctrl, unsigned nsid)
 	return ret;
 }
 EXPORT_SYMBOL_NS_GPL(nvme_find_get_ns, NVME_TARGET_PASSTHRU);
+
+static struct nvme_ns *nvme_find_get_ns_by_disk_name(struct nvme_ctrl *ctrl,
+		const char *disk_name)
+{
+	struct nvme_ns *ns, *ret = NULL;
+
+	down_read(&ctrl->namespaces_rwsem);
+	list_for_each_entry(ns, &ctrl->namespaces, list) {
+		if (!strcmp(ns->disk->disk_name, disk_name)) {
+			if (!kref_get_unless_zero(&ns->kref))
+				continue;
+			ret = ns;
+			break;
+		}
+	}
+	up_read(&ctrl->namespaces_rwsem);
+
+	return ret;
+}
 
 static void nvme_alloc_ns(struct nvme_ctrl *ctrl, unsigned nsid,
 		struct nvme_ns_ids *ids)
@@ -4751,6 +4911,7 @@ static inline void _nvme_check_size(void)
 	BUILD_BUG_ON(sizeof(struct nvme_smart_log) != 512);
 	BUILD_BUG_ON(sizeof(struct nvme_dbbuf) != 64);
 	BUILD_BUG_ON(sizeof(struct nvme_directive_cmd) != 64);
+	BUILD_BUG_ON(sizeof(struct nvme_ns_attach) != 64);
 }
 
 
