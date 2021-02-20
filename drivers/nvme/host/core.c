@@ -3454,6 +3454,28 @@ static ssize_t nsid_show(struct device *dev, struct device_attribute *attr,
 }
 static DEVICE_ATTR_RO(nsid);
 
+#ifdef CONFIG_NVME_MULTIPATH
+static ssize_t path_show(struct device *dev, struct device_attribute *attr,
+		char *buf)
+{
+	struct nvme_ns_head *head = dev_to_ns_head(dev);
+	struct nvme_ns *ns;
+	int node = numa_node_id();
+	int srcu_idx;
+
+	srcu_idx = srcu_read_lock(&head->srcu);
+	ns = srcu_dereference(head->current_path[node], &head->srcu);
+	if (!ns) {
+		srcu_read_unlock(&head->srcu, srcu_idx);
+		return sprintf(buf, "none\n");
+	}
+
+	srcu_read_unlock(&head->srcu, srcu_idx);
+	return sprintf(buf, "%s\n", ns->disk->disk_name);
+}
+static DEVICE_ATTR_RO(path);
+#endif
+
 static struct attribute *nvme_ns_id_attrs[] = {
 	&dev_attr_wwid.attr,
 	&dev_attr_uuid.attr,
@@ -3463,6 +3485,7 @@ static struct attribute *nvme_ns_id_attrs[] = {
 #ifdef CONFIG_NVME_MULTIPATH
 	&dev_attr_ana_grpid.attr,
 	&dev_attr_ana_state.attr,
+	&dev_attr_path.attr,
 #endif
 	NULL,
 };
@@ -3491,6 +3514,11 @@ static umode_t nvme_ns_id_attrs_are_visible(struct kobject *kobj,
 		if (dev_to_disk(dev)->fops != &nvme_bdev_ops) /* per-path attr */
 			return 0;
 		if (!nvme_ctrl_use_ana(nvme_get_ns_from_dev(dev)->ctrl))
+			return 0;
+	}
+
+	if (a == &dev_attr_path.attr) {
+		if (dev_to_disk(dev)->fops == &nvme_bdev_ops)
 			return 0;
 	}
 #endif
