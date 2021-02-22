@@ -1887,11 +1887,6 @@ static int nvme_compat_ioctl(struct block_device *bdev, fmode_t mode,
 
 static int nvme_ns_open(struct nvme_ns *ns)
 {
-#ifdef CONFIG_NVME_MULTIPATH
-	/* should never be called due to GENHD_FL_HIDDEN */
-	if (WARN_ON_ONCE(ns->head->disk))
-		goto fail;
-#endif
 	if (!kref_get_unless_zero(&ns->kref))
 		goto fail;
 	if (!try_module_get(ns->ctrl->ops->module))
@@ -1913,7 +1908,15 @@ static void nvme_ns_release(struct nvme_ns *ns)
 
 static int nvme_open(struct block_device *bdev, fmode_t mode)
 {
-	return nvme_ns_open(bdev->bd_disk->private_data);
+	struct nvme_ns *ns = bdev->bd_disk->private_data;
+
+#ifdef CONFIG_NVME_MULTIPATH
+	/* should never be called due to GENHD_FL_HIDDEN */
+	if (WARN_ON_ONCE(ns->head->disk))
+		return -ENXIO;
+#endif
+
+	return nvme_ns_open(ns);
 }
 
 static void nvme_release(struct gendisk *disk, fmode_t mode)
