@@ -425,6 +425,7 @@ struct nvme_ns_head {
 enum nvme_ns_features {
 	NVME_NS_EXT_LBAS = 1 << 0, /* support extended LBA format */
 	NVME_NS_METADATA_SUPPORTED = 1 << 1, /* support getting generated md */
+	NVME_NS_CHAR_SUPPORTED = 1 << 2, /* support for char device */
 };
 
 struct nvme_ns {
@@ -441,6 +442,10 @@ struct nvme_ns {
 	struct nvm_dev *ndev;
 	struct kref kref;
 	struct nvme_ns_head *head;
+
+	struct device cdev_device;	/* char device */
+	struct cdev cdev;
+	int minor;
 
 	int lba_shift;
 	u16 ms;
