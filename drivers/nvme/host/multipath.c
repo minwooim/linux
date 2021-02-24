@@ -13,6 +13,10 @@ module_param(multipath, bool, 0444);
 MODULE_PARM_DESC(multipath,
 	"turn on native support for multiple controllers per subsystem");
 
+static unsigned long requeue_timeout = 60;
+module_param(requeue_timeout, ulong, 0644);
+MODULE_PARM_DESC(requeue_timeout, "requeueing I/O timeout in secs");
+
 void nvme_mpath_unfreeze(struct nvme_subsystem *subsys)
 {
 	struct nvme_ns_head *h;
@@ -322,6 +326,8 @@ blk_qc_t nvme_ns_head_submit_bio(struct bio *bio)
 
 		spin_lock_irq(&head->requeue_lock);
 		bio_list_add(&head->requeue_list, bio);
+		mod_timer(&head->requeue_timer,
+				jiffies + requeue_timeout * HZ);
 		spin_unlock_irq(&head->requeue_lock);
 	} else {
 		dev_warn_ratelimited(dev, "no available path - failing I/O\n");
@@ -342,6 +348,8 @@ static void nvme_requeue_work(struct work_struct *work)
 
 	spin_lock_irq(&head->requeue_lock);
 	next = bio_list_get(&head->requeue_list);
+	if (next)
+		del_timer_sync(&head->requeue_timer);
 	spin_unlock_irq(&head->requeue_lock);
 
 	while ((bio = next) != NULL) {
@@ -357,6 +365,21 @@ static void nvme_requeue_work(struct work_struct *work)
 	}
 }
 
+static void nvme_requeue_timeout(struct timer_list *t)
+{
+	struct nvme_ns_head *head = from_timer(head, t, requeue_timer);
+	struct nvme_ns *ns;
+	int srcu_idx;
+
+	srcu_idx = srcu_read_lock(&head->srcu);
+	list_for_each_entry_rcu(ns, &head->list, siblings) {
+		queue_work(nvme_wq, &ns->ctrl->ana_work);
+	}
+	srcu_read_unlock(&head->srcu, srcu_idx);
+
+	mod_timer(&head->requeue_timer, jiffies + requeue_timeout * HZ);
+}
+
 int nvme_mpath_alloc_disk(struct nvme_ctrl *ctrl, struct nvme_ns_head *head)
 {
 	struct request_queue *q;
@@ -366,6 +389,7 @@ int nvme_mpath_alloc_disk(struct nvme_ctrl *ctrl, struct nvme_ns_head *head)
 	bio_list_init(&head->requeue_list);
 	spin_lock_init(&head->requeue_lock);
 	INIT_WORK(&head->requeue_work, nvme_requeue_work);
+	timer_setup(&head->requeue_timer, nvme_requeue_timeout, 0);
 
 	/*
 	 * Add a multipath node if the subsystems supports multiple controllers.
