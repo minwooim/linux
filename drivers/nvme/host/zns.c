@@ -71,7 +71,7 @@ int nvme_update_zone_info(struct nvme_ns *ns, unsigned lbaf)
 	/* Lazily query controller append limit for the first zoned namespace */
 	if (!ns->ctrl->max_zone_append) {
 		status = nvme_set_max_append(ns->ctrl);
-		if (status)
+		if (status < 0)
 			return status;
 	}
 
@@ -85,7 +85,7 @@ int nvme_update_zone_info(struct nvme_ns *ns, unsigned lbaf)
 	c.identify.csi = NVME_CSI_ZNS;
 
 	status = nvme_submit_sync_cmd(ns->ctrl->admin_q, &c, id, sizeof(*id));
-	if (status)
+	if (status < 0)
 		goto free_data;
 
 	/*
@@ -97,7 +97,6 @@ int nvme_update_zone_info(struct nvme_ns *ns, unsigned lbaf)
 			"zone operations:%x not supported for namespace:%u\n",
 			le16_to_cpu(id->zoc), ns->head->ns_id);
 		status = -EINVAL;
-		goto free_data;
 	}
 
 	ns->zsze = nvme_lba_to_sect(ns, le64_to_cpu(id->lbafe[lbaf].zsze));
@@ -106,7 +105,6 @@ int nvme_update_zone_info(struct nvme_ns *ns, unsigned lbaf)
 			"invalid zone size:%llu for namespace:%u\n",
 			ns->zsze, ns->head->ns_id);
 		status = -EINVAL;
-		goto free_data;
 	}
 
 	q->limits.zoned = BLK_ZONED_HM;

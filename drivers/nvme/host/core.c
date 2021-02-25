@@ -2250,12 +2250,17 @@ static int nvme_update_ns_info(struct nvme_ns *ns, struct nvme_id_ns *id)
 	if (ns->head->ids.csi == NVME_CSI_ZNS) {
 		ret = nvme_update_zone_info(ns, lbaf);
 		if (ret)
-			goto out_unfreeze;
+			dev_warn(ns->ctrl->device,
+				 "failed to update zone information nsid=%u\n",
+				 ns->head->ns_id);
 	}
 
 	ret = nvme_configure_metadata(ns, id);
 	if (ret)
-		goto out_unfreeze;
+		dev_warn(ns->ctrl->device,
+			 "failed to configure metadata nsid=%u\n",
+			 ns->head->ns_id);
+
 	nvme_set_chunk_sectors(ns, id);
 	nvme_update_disk_info(ns->disk, ns, id);
 	blk_mq_unfreeze_queue(ns->disk->queue);
@@ -2277,10 +2282,6 @@ static int nvme_update_ns_info(struct nvme_ns *ns, struct nvme_id_ns *id)
 	}
 #endif
 	return 0;
-
-out_unfreeze:
-	blk_mq_unfreeze_queue(ns->disk->queue);
-	return ret;
 }
 
 static char nvme_pr_type(enum pr_type type)
