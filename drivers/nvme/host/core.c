@@ -4019,6 +4019,12 @@ static int nvme_alloc_chardev_ns(struct nvme_ctrl *ctrl, struct nvme_ns *ns)
 	if (ret)
 		goto free_kobj;
 
+	ret = sysfs_create_link(&ns->cdev_device.kobj,
+			&disk_to_dev(ns->disk)->kobj, ns->disk->disk_name);
+	if (ret)
+		dev_err(&ns->cdev_device,
+			"failed to create sysfs link from chardev.\n");
+
 	return ret;
 
 free_kobj:
