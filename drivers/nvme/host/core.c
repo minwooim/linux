@@ -61,6 +61,10 @@ static bool streams;
 module_param(streams, bool, 0644);
 MODULE_PARM_DESC(streams, "turn on support for Streams write directives");
 
+static bool generic_ns = true;
+module_param(generic_ns, bool, 0644);
+MODULE_PARM_DESC(generic_ns, "support generic namespace character device");
+
 /*
  * nvme_wq - hosts nvme related works that are not reset or delete
  * nvme_reset_wq - hosts nvme reset works
@@ -85,8 +89,11 @@ static LIST_HEAD(nvme_subsystems);
 static DEFINE_MUTEX(nvme_subsystems_lock);
 
 static DEFINE_IDA(nvme_instance_ida);
+static DEFINE_IDA(nvme_generic_ns_minor_ida);
 static dev_t nvme_ctrl_base_chr_devt;
+static dev_t nvme_generic_ns_devt;
 static struct class *nvme_class;
+static struct class *nvme_generic_ns_class;
 static struct class *nvme_subsys_class;
 
 static void nvme_put_subsystem(struct nvme_subsystem *subsys);
@@ -542,6 +549,7 @@ static void nvme_free_ns_head(struct kref *ref)
 	struct nvme_ns_head *head =
 		container_of(ref, struct nvme_ns_head, ref);
 
+	cdev_device_del(&head->generic_ns->cdev, &head->generic_ns->device);
 	nvme_mpath_remove_disk(head);
 	ida_simple_remove(&head->subsys->ns_ida, head->instance);
 	cleanup_srcu_struct(&head->srcu);
@@ -3781,6 +3789,126 @@ static int __nvme_check_ids(struct nvme_subsystem *subsys,
 	return 0;
 }
 
+#ifdef CONFIG_NVME_MULTIPATH
+static int nvme_generic_ns_open(struct inode *inode, struct file *file)
+{
+	struct nvme_generic_ns *generic_ns = container_of(inode->i_cdev,
+			struct nvme_generic_ns, cdev);
+
+	if (!generic_ns->head->disk)
+		return -ENODEV;
+
+	file->private_data = generic_ns;
+	return nvme_ns_head_open(generic_ns->head->disk->part0, file->f_mode);
+}
+
+static int nvme_generic_ns_release(struct inode *inode, struct file *file)
+{
+	struct nvme_generic_ns *generic_ns = container_of(inode->i_cdev,
+			struct nvme_generic_ns, cdev);
+
+	nvme_ns_head_release(generic_ns->head->disk, file->f_mode);
+
+	return 0;
+}
+
+static long nvme_generic_ns_ioctl(struct file *file, unsigned int cmd,
+		unsigned long arg)
+{
+	struct nvme_generic_ns *generic_ns = file->private_data;
+
+	return nvme_ioctl(generic_ns->head->disk->part0, file->f_mode, cmd, arg);
+}
+#else
+static int nvme_generic_ns_open(struct inode *inode, struct file *file)
+{
+	struct nvme_generic_ns *generic_ns = container_of(inode->i_cdev,
+			struct nvme_generic_ns, cdev);
+
+	if (!generic_ns->ns)
+		return -ENODEV;
+
+	file->private_data = generic_ns;
+	return nvme_open(generic_ns->ns->disk->part0, file->f_mode);
+}
+
+static int nvme_generic_ns_release(struct inode *inode, struct file *file)
+{
+	struct nvme_generic_ns *generic_ns = container_of(inode->i_cdev,
+			struct nvme_generic_ns, cdev);
+
+	nvme_release(generic_ns->ns->disk, file->f_mode);
+
+	return 0;
+}
+
+static long nvme_generic_ns_ioctl(struct file *file, unsigned int cmd,
+		unsigned long arg)
+{
+	struct nvme_generic_ns *generic_ns = file->private_data;
+
+	return nvme_ioctl(generic_ns->ns->disk->part0, file->f_mode, cmd, arg);
+}
+#endif
+
+static const struct file_operations nvme_generic_ns_fops = {
+	.owner		= THIS_MODULE,
+	.open		= nvme_generic_ns_open,
+	.release	= nvme_generic_ns_release,
+	.unlocked_ioctl	= nvme_generic_ns_ioctl,
+	.compat_ioctl	= compat_ptr_ioctl,
+};
+
+static int nvme_alloc_generic_ns(struct nvme_ctrl *ctrl,
+		struct nvme_ns_head *head, struct nvme_ns *ns)
+{
+	struct nvme_generic_ns *generic_ns;
+	char name[DISK_NAME_LEN];
+	int minor;
+	int ret;
+
+	generic_ns = kzalloc_node(sizeof(*generic_ns), GFP_KERNEL,
+			ctrl->numa_node);
+	if (!generic_ns)
+		return -ENOMEM;
+
+	ret = ida_simple_get(&nvme_generic_ns_minor_ida, 0, 0, GFP_KERNEL);
+	if (ret < 0)
+		goto free_ns;
+	minor = ret;
+
+	device_initialize(&generic_ns->device);
+	generic_ns->device.devt = MKDEV(MAJOR(nvme_generic_ns_devt), minor);
+	generic_ns->device.class = nvme_generic_ns_class;
+	generic_ns->device.parent = ctrl->device;
+	dev_set_drvdata(&generic_ns->device, generic_ns);
+
+	nvme_set_generic_ns_name(name, head, ctrl);
+	ret = dev_set_name(&generic_ns->device, "%s", name);
+	if (ret)
+		goto put_ida;
+
+	cdev_init(&generic_ns->cdev, &nvme_generic_ns_fops);
+	generic_ns->cdev.owner = ctrl->ops->module;
+
+	ret = cdev_device_add(&generic_ns->cdev, &generic_ns->device);
+	if (ret)
+		goto free_kobj;
+
+	head->generic_ns = generic_ns;
+	generic_ns->head = head;
+	generic_ns->ns = ns;
+	return 0;
+
+free_kobj:
+	kfree_const(generic_ns->device.kobj.name);
+put_ida:
+	ida_simple_remove(&nvme_generic_ns_minor_ida, minor);
+free_ns:
+	kfree(generic_ns);
+	return ret;
+}
+
 static struct nvme_ns_head *nvme_alloc_ns_head(struct nvme_ctrl *ctrl,
 		unsigned nsid, struct nvme_ns_ids *ids)
 {
@@ -3859,6 +3987,13 @@ static int nvme_init_ns_head(struct nvme_ns *ns, unsigned nsid,
 			goto out_unlock;
 		}
 		head->shared = is_shared;
+
+		if (generic_ns && nvme_alloc_generic_ns(ctrl, head, ns)) {
+			dev_err(ctrl->device,
+				"Failed to initialize generic namespace %d\n",
+				nsid);
+			goto out_put_ns_head;
+		}
 	} else {
 		ret = -EINVAL;
 		if (!is_shared || !head->shared) {
@@ -3960,8 +4095,17 @@ static void nvme_alloc_ns(struct nvme_ctrl *ctrl, unsigned nsid,
 	memcpy(disk->disk_name, disk_name, DISK_NAME_LEN);
 	ns->disk = disk;
 
-	if (nvme_update_ns_info(ns, id))
-		goto out_put_disk;
+	/*
+	 * If the namespace update fails in a graceful manner, hide the block
+	 * device, but still allow for the generic namespae device to be
+	 * craeted.
+	 */
+	if (nvme_update_ns_info(ns, id)) {
+		if (generic_ns)
+			ns->disk->flags |= GENHD_FL_HIDDEN;
+		else
+			goto out_put_disk;
+	}
 
 	if ((ctrl->quirks & NVME_QUIRK_LIGHTNVM) && id->vs[0] == 0x1) {
 		if (nvme_nvm_register(ns, disk_name, node)) {
@@ -3980,6 +4124,7 @@ static void nvme_alloc_ns(struct nvme_ctrl *ctrl, unsigned nsid,
 
 	nvme_mpath_add_disk(ns, id);
 	nvme_fault_inject_init(&ns->fault_inject, ns->disk->disk_name);
+
 	kfree(id);
 
 	return;
@@ -4805,13 +4950,31 @@ static int __init nvme_core_init(void)
 	}
 	nvme_class->dev_uevent = nvme_class_uevent;
 
+	if (!generic_ns) return 0;
+
+	result = alloc_chrdev_region(&nvme_generic_ns_devt, 0,
+			NVME_MINORS, "nvme-generic-ns");
+	if (result < 0)
+		goto destroy_class;
+
 	nvme_subsys_class = class_create(THIS_MODULE, "nvme-subsystem");
 	if (IS_ERR(nvme_subsys_class)) {
 		result = PTR_ERR(nvme_subsys_class);
-		goto destroy_class;
+		goto unregister_generic_ns;
 	}
+
+	nvme_generic_ns_class = class_create(THIS_MODULE, "nvme-generic-ns");
+	if (IS_ERR(nvme_generic_ns_class)) {
+		result = PTR_ERR(nvme_subsys_class);
+		goto destroy_subsys_class;
+	}
+
 	return 0;
 
+destroy_subsys_class:
+	class_destroy(nvme_subsys_class);
+unregister_generic_ns:
+	unregister_chrdev_region(nvme_generic_ns_devt, NVME_MINORS);
 destroy_class:
 	class_destroy(nvme_class);
 unregister_chrdev:
@@ -4830,6 +4993,7 @@ static void __exit nvme_core_exit(void)
 {
 	class_destroy(nvme_subsys_class);
 	class_destroy(nvme_class);
+	unregister_chrdev_region(nvme_generic_ns_devt, NVME_MINORS);
 	unregister_chrdev_region(nvme_ctrl_base_chr_devt, NVME_MINORS);
 	destroy_workqueue(nvme_delete_wq);
 	destroy_workqueue(nvme_reset_wq);
