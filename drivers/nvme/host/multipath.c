@@ -65,6 +65,22 @@ void nvme_set_disk_name(char *disk_name, struct nvme_ns *ns,
 	}
 }
 
+/*
+ * It sets generic namespace chardev name based on the given namespace head.
+ * The naming convention follows the existing namespace disk name from
+ * nvme_set_disk_name(), but not allowing controller path specific.
+ */
+void nvme_set_generic_ns_name(char *dev_name, struct nvme_ns_head *head,
+			      struct nvme_ctrl *ctrl)
+{
+	if (!multipath)
+		sprintf(dev_name, "nvme-generic-%dn%d",
+				ctrl->instance, head->instance);
+	else
+		sprintf(dev_name, "nvme-generic-%dn%d",
+				ctrl->subsys->instance, head->instance);
+}
+
 void nvme_failover_req(struct request *req)
 {
 	struct nvme_ns *ns = req->q->queuedata;

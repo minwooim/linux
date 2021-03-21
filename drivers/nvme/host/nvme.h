@@ -413,6 +413,8 @@ struct nvme_ns_head {
 	bool			shared;
 	int			instance;
 	struct nvme_effects_log *effects;
+	struct nvme_generic_ns	*generic_ns;
+
 #ifdef CONFIG_NVME_MULTIPATH
 	struct gendisk		*disk;
 	struct bio_list		requeue_list;
@@ -462,6 +464,24 @@ struct nvme_ns {
 
 	struct nvme_fault_inject fault_inject;
 
+};
+
+/*
+ * Generic character device for a namespace.  This device is to support I/O to
+ * namespace even it's failed to initialize due to some reasons (e.g.,
+ * unsupported protection information, etc).
+ */
+struct nvme_generic_ns {
+	struct device		device;
+	struct cdev		cdev;
+	struct nvme_ns_head	*head;
+
+	/*
+	 * targted namespace instance which is only valid when head is not
+	 * allocaed properly (e.g., non-multipath, multi-controller not
+	 * supported)
+	 */
+	struct nvme_ns		*ns;
 };
 
 /* NVMe ns supports metadata actions by the controller (generate/strip) */
@@ -665,6 +685,8 @@ void nvme_mpath_wait_freeze(struct nvme_subsystem *subsys);
 void nvme_mpath_start_freeze(struct nvme_subsystem *subsys);
 void nvme_set_disk_name(char *disk_name, struct nvme_ns *ns,
 			struct nvme_ctrl *ctrl, int *flags);
+void nvme_set_generic_ns_name(char *dev_name, struct nvme_ns_head *head,
+			      struct nvme_ctrl *ctrl);
 void nvme_failover_req(struct request *req);
 void nvme_kick_requeue_lists(struct nvme_ctrl *ctrl);
 int nvme_mpath_alloc_disk(struct nvme_ctrl *ctrl,struct nvme_ns_head *head);
@@ -711,6 +733,13 @@ static inline void nvme_set_disk_name(char *disk_name, struct nvme_ns *ns,
 				      struct nvme_ctrl *ctrl, int *flags)
 {
 	sprintf(disk_name, "nvme%dn%d", ctrl->instance, ns->head->instance);
+}
+
+static inline void nvme_set_generic_ns_name(char *dev_name,
+		struct nvme_ns_head *head, struct nvme_ctrl *ctrl)
+{
+	sprintf(dev_name, "nvme-generic-%dn%d", ctrl->instance,
+			head->instance);
 }
 
 static inline void nvme_failover_req(struct request *req)
