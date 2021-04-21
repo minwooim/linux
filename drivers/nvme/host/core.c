@@ -2005,8 +2005,27 @@ static const struct block_device_operations nvme_bdev_ops = {
 	.pr_ops		= &nvme_pr_ops,
 };
 
+static struct nvme_ns *nvme_find_ns(struct nvme_ctrl *ctrl, unsigned nsid)
+{
+	struct nvme_ns *ns, *ret = NULL;
+
+	down_read(&ctrl->namespaces_rwsem);
+	list_for_each_entry(ns, &ctrl->namespaces, list) {
+		if (ns->head->ns_id > nsid)
+			break;
+
+		if (ns->head->ns_id == nsid) {
+			ret = ns;
+			break;
+		}
+	}
+	up_read(&ctrl->namespaces_rwsem);
+	return ret;
+}
+
 #ifdef CONFIG_NVME_MULTIPATH
-struct nvme_ctrl *nvme_find_get_live_ctrl(struct nvme_subsystem *subsys)
+struct nvme_ctrl *nvme_find_get_live_ctrl(struct nvme_subsystem *subsys,
+		unsigned nsid)
 {
 	struct nvme_ctrl *ctrl;
 	int ret;
@@ -2015,7 +2034,7 @@ struct nvme_ctrl *nvme_find_get_live_ctrl(struct nvme_subsystem *subsys)
 	if (ret)
 		return ERR_PTR(ret);
 	list_for_each_entry(ctrl, &subsys->ctrls, subsys_entry) {
-		if (ctrl->state == NVME_CTRL_LIVE)
+		if (ctrl->state == NVME_CTRL_LIVE && nvme_find_ns(ctrl, nsid))
 			goto found;
 	}
 	mutex_unlock(&nvme_subsystems_lock);
@@ -3544,21 +3563,15 @@ static int ns_cmp(void *priv, struct list_head *a, struct list_head *b)
 
 struct nvme_ns *nvme_find_get_ns(struct nvme_ctrl *ctrl, unsigned nsid)
 {
-	struct nvme_ns *ns, *ret = NULL;
+	struct nvme_ns *ns;
 
-	down_read(&ctrl->namespaces_rwsem);
-	list_for_each_entry(ns, &ctrl->namespaces, list) {
-		if (ns->head->ns_id == nsid) {
-			if (!kref_get_unless_zero(&ns->kref))
-				continue;
-			ret = ns;
-			break;
-		}
-		if (ns->head->ns_id > nsid)
-			break;
+	ns = nvme_find_ns(ctrl, nsid);
+	if (ns) {
+		if (!kref_get_unless_zero(&ns->kref))
+			return NULL;
 	}
-	up_read(&ctrl->namespaces_rwsem);
-	return ret;
+	return ns;
+
 }
 EXPORT_SYMBOL_NS_GPL(nvme_find_get_ns, NVME_TARGET_PASSTHRU);
 

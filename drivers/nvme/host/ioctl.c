@@ -361,7 +361,8 @@ int nvme_ioctl(struct block_device *bdev, fmode_t mode,
 static int nvme_ns_head_ctrl_ioctl(struct nvme_ns_head *head,
 		unsigned int cmd, void __user *argp)
 {
-	struct nvme_ctrl *ctrl = nvme_find_get_live_ctrl(head->subsys);
+	struct nvme_ctrl *ctrl =
+		nvme_find_get_live_ctrl(head->subsys, head->ns_id);
 	int ret;
 
 	if (IS_ERR(ctrl))
