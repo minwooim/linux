@@ -15,6 +15,7 @@
 #include <linux/falloc.h>
 #include <linux/suspend.h>
 #include <linux/fs.h>
+#include <linux/io_uring.h>
 #include "blk.h"
 
 static inline struct inode *bdev_file_inode(struct file *file)
@@ -140,6 +141,14 @@ struct blkdev_dio {
 };
 
 static struct bio_set blkdev_dio_pool;
+
+static int blkdev_async_cmd(struct io_uring_cmd *cmd,
+			    enum io_uring_cmd_flags flags)
+{
+	struct block_device *bdev = I_BDEV(cmd->file->f_mapping->host);
+
+	return blk_async_cmd(bdev, cmd, flags);
+}
 
 static void blkdev_bio_end_io(struct bio *bio)
 {
@@ -670,6 +679,7 @@ const struct file_operations def_blk_fops = {
 	.splice_read	= generic_file_splice_read,
 	.splice_write	= iter_file_splice_write,
 	.fallocate	= blkdev_fallocate,
+	.async_cmd	= blkdev_async_cmd,
 };
 
 static __init int blkdev_init(void)
