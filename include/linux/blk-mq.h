@@ -928,6 +928,7 @@ int blk_rq_map_kern(struct request_queue *, struct request *, void *,
 int blk_rq_append_bio(struct request *rq, struct bio *bio);
 void blk_execute_rq_nowait(struct gendisk *, struct request *, int,
 		rq_end_io_fn *);
+bool blk_rq_is_poll(struct request *rq);
 blk_status_t blk_execute_rq(struct gendisk *bd_disk, struct request *rq,
 		int at_head);
 
