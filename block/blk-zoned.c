@@ -121,7 +121,7 @@ unsigned int blkdev_nr_zones(struct gendisk *disk)
 
 	if (!blk_queue_is_zoned(disk->queue))
 		return 0;
-	return (get_capacity(disk) + zone_sectors - 1) >> ilog2(zone_sectors);
+	return div64_u64(get_capacity(disk) + zone_sectors - 1, zone_sectors);
 }
 EXPORT_SYMBOL_GPL(blkdev_nr_zones);
 
@@ -287,11 +287,15 @@ int blkdev_zone_mgmt(struct block_device *bdev, enum req_opf op,
 		return -EINVAL;
 
 	/* Check alignment (handle eventual smaller last zone) */
+	/*
 	if (sector & (zone_sectors - 1))
 		return -EINVAL;
+	*/
 
+	/*
 	if ((nr_sectors & (zone_sectors - 1)) && end_sector != capacity)
 		return -EINVAL;
+	*/
 
 	/*
 	 * In the case of a zone reset operation over all zones,
