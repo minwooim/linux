@@ -304,6 +304,11 @@ static int __f2fs_write_meta_page(struct page *page,
 
 	trace_f2fs_writepage(page, META);
 
+	if (le32_to_cpu(sbi->raw_super->nat_blkaddr) <= page->index &&
+			le32_to_cpu(sbi->raw_super->ssa_blkaddr) > page->index)
+		trace_printk("WRITE META START: io_type=%d, page->index=0x%llx\n",
+				io_type, page->index);
+
 	if (unlikely(f2fs_cp_error(sbi)))
 		goto redirty_out;
 	if (unlikely(is_sbi_flag_set(sbi, SBI_POR_DOING)))
@@ -439,6 +444,10 @@ stop:
 static int f2fs_set_meta_page_dirty(struct page *page)
 {
 	trace_f2fs_set_page_dirty(page, META);
+
+	if (F2FS_P_SB(page)->raw_super->nat_blkaddr <= page->index &&
+		F2FS_P_SB(page)->raw_super->ssa_blkaddr > page->index)
+		trace_printk("DIRTY NAT META PAGE: page->index=0x%x\n", page->index);
 
 	if (!PageUptodate(page))
 		SetPageUptodate(page);

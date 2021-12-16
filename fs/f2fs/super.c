@@ -3822,10 +3822,20 @@ static int f2fs_scan_devices(struct f2fs_sb_info *sbi)
 				  FDEV(i).start_blk, FDEV(i).end_blk,
 				  bdev_zoned_model(FDEV(i).bdev) == BLK_ZONED_HA ?
 				  "Host-aware" : "Host-managed");
+			trace_printk("Mount Device [%2d]: %20s, %8u, %8x - %8x (zone: %s)\n",
+				  i, FDEV(i).path,
+				  FDEV(i).total_segments,
+				  FDEV(i).start_blk, FDEV(i).end_blk,
+				  bdev_zoned_model(FDEV(i).bdev) == BLK_ZONED_HA ?
+				  "Host-aware" : "Host-managed");
 			continue;
 		}
 #endif
 		f2fs_info(sbi, "Mount Device [%2d]: %20s, %8u, %8x - %8x",
+			  i, FDEV(i).path,
+			  FDEV(i).total_segments,
+			  FDEV(i).start_blk, FDEV(i).end_blk);
+		trace_printk("Mount Device [%2d]: %20s, %8u, %8x - %8x\n",
 			  i, FDEV(i).path,
 			  FDEV(i).total_segments,
 			  FDEV(i).start_blk, FDEV(i).end_blk);
@@ -3934,6 +3944,19 @@ try_onemore:
 								&recovery);
 	if (err)
 		goto free_sbi;
+
+	trace_printk("SUPERBLOCK: cp_blkaddr=0x%x, sit_blkaddr=0x%x, "
+			"nat_blkaddr[0]=0x%x, nat_blkaddr[1]=0x%x, "
+			"ssa_blkaddr=0x%x, main_blkaddr=0x%x\n",
+			le32_to_cpu(raw_super->cp_blkaddr),
+			le32_to_cpu(raw_super->sit_blkaddr),
+			le32_to_cpu(raw_super->nat_blkaddr),
+			le32_to_cpu(raw_super->nat_blkaddr) +
+				(le32_to_cpu(raw_super->ssa_blkaddr) -
+					le32_to_cpu(raw_super->nat_blkaddr)) / 2,
+			le32_to_cpu(raw_super->ssa_blkaddr),
+			le32_to_cpu(raw_super->main_blkaddr));
+			
 
 	sb->s_fs_info = sbi;
 	sbi->raw_super = raw_super;

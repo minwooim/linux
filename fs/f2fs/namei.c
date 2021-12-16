@@ -132,6 +132,7 @@ static struct inode *f2fs_new_inode(struct inode *dir, umode_t mode)
 	f2fs_set_inode_flags(inode);
 
 	trace_f2fs_new_inode(inode, 0);
+	trace_printk("NEW INODE: ino=0x%x\n", inode->i_ino);
 	return inode;
 
 fail:

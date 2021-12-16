@@ -490,6 +490,8 @@ static void set_node_addr(struct f2fs_sb_info *sbi, struct node_info *ni,
 		nat_set_version(e, inc_node_version(version));
 	}
 
+	trace_printk("NAT ENTRY UPDATE: nid=0x%x, ino=0x%x, old=0x%x, new=0x%x\n",
+			nat_get_nid(e), nat_get_ino(e), nat_get_blkaddr(e), new_blkaddr);
 	/* change address */
 	nat_set_blkaddr(e, new_blkaddr);
 	if (!__is_valid_data_blkaddr(new_blkaddr))
@@ -1299,6 +1301,9 @@ struct page *f2fs_new_node_page(struct dnode_of_data *dn, unsigned int ofs)
 	new_ni.flag = 0;
 	new_ni.version = 0;
 	set_node_addr(sbi, &new_ni, NEW_ADDR, false);
+
+	trace_printk("NEW NODE: nid=0x%x, ino=0x%x, blkaddr=0x%x\n",
+			new_ni.nid, new_ni.ino, new_ni.blk_addr);
 
 	f2fs_wait_on_page_writeback(page, NODE, true, true);
 	fill_node_footer(page, dn->nid, dn->inode->i_ino, ofs, true);
