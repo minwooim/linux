@@ -627,6 +627,7 @@ retry:
 	node_info_from_raw_nat(ni, &ne);
 
 	// get_node_info(sbi, nid, ni, &ne);
+	up_read(&nm_i->nat_tree_lock);
 	trace_printk("GET NODE INFO: nid=0x%x, ino=0x%x, blkaddr=0x%x\n",
 			ni->nid, ni->ino, ni->blk_addr);
 
