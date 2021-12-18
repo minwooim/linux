@@ -66,13 +66,14 @@ F2FS_NAT_Entry f2fs_kv_get(__u32 node_id) {
         printk("Skiplist | node %d not found\n", node_id);
     }
 
+#endif
+    if(ret != NULL)
+        memcpy(&entry, ret, sizeof(Skiplist_Entry));
+
     trace_printk("KV GET: key=0x%x, value.version=%d, value.ino=0x%x, value.block_addr=0x%x\n",
 		    node_id, entry.nat_entry.version,
 		    entry.nat_entry.ino, entry.nat_entry.block_addr);
 
-#endif
-    if(ret != NULL) 
-        memcpy(&entry, ret, sizeof(Skiplist_Entry));
 
     return entry.nat_entry;
 }
