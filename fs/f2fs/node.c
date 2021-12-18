@@ -27,6 +27,33 @@ static struct kmem_cache *free_nid_slab;
 static struct kmem_cache *nat_entry_set_slab;
 static struct kmem_cache *fsync_node_entry_slab;
 
+static inline int get_node_info(struct f2fs_sb_info *sbi, nid_t nid,
+		struct node_info *ni, struct f2fs_nat_entry *ne)
+{
+	struct f2fs_nm_info *nm_i = NM_I(sbi);
+	struct f2fs_nat_block *nat_blk;
+	struct page *page = NULL;
+	nid_t start_nid = START_NID(nid);
+	pgoff_t index;
+
+	index = current_nat_addr(sbi, nid);
+	up_read(&nm_i->nat_tree_lock);
+
+	page = f2fs_get_meta_page(sbi, index);
+	if (IS_ERR(page))
+		return PTR_ERR(page);
+
+	nat_blk = (struct f2fs_nat_block *)page_address(page);
+	*ne = nat_blk->entries[nid - start_nid];
+	node_info_from_raw_nat(ni, ne);
+	f2fs_put_page(page, 1);
+
+	trace_printk("GET NODE INFO: nid=0x%x, ino=0x%x, blkaddr=0x%x\n",
+			ni->nid, ni->ino, ni->blk_addr);
+
+	return 0;
+}
+
 /*
  * Check whether the given nid is within node id range.
  */
@@ -546,12 +573,8 @@ int f2fs_get_node_info(struct f2fs_sb_info *sbi, nid_t nid,
 	struct f2fs_nm_info *nm_i = NM_I(sbi);
 	struct curseg_info *curseg = CURSEG_I(sbi, CURSEG_HOT_DATA);
 	struct f2fs_journal *journal = curseg->journal;
-	nid_t start_nid = START_NID(nid);
-	struct f2fs_nat_block *nat_blk;
-	struct page *page = NULL;
 	struct f2fs_nat_entry ne;
 	struct nat_entry *e;
-	pgoff_t index;
 	block_t blkaddr;
 	int i;
 
@@ -593,17 +616,9 @@ retry:
 	}
 
 	/* Fill node_info from nat page */
-	index = current_nat_addr(sbi, nid);
-	up_read(&nm_i->nat_tree_lock);
+	/* NAT entry (ro case) */
+	get_node_info(sbi, nid, ni, &ne);
 
-	page = f2fs_get_meta_page(sbi, index);
-	if (IS_ERR(page))
-		return PTR_ERR(page);
-
-	nat_blk = (struct f2fs_nat_block *)page_address(page);
-	ne = nat_blk->entries[nid - start_nid];
-	node_info_from_raw_nat(ni, &ne);
-	f2fs_put_page(page, 1);
 cache:
 	blkaddr = le32_to_cpu(ne.block_addr);
 	if (__is_valid_data_blkaddr(blkaddr) &&
@@ -3050,6 +3065,86 @@ static int __flush_nat_entry_set(struct f2fs_sb_info *sbi,
 	return 0;
 }
 
+
+static void f2fs_kv_done(struct bio *bio)
+{
+	struct bio_vec bvec;
+	struct bvec_iter iter;
+
+	bio_for_each_bvec(bvec, bio, iter)
+		__free_page(bvec.bv_page);
+
+	bio_put(bio);
+}
+
+static void f2fs_kv_flush(struct f2fs_sb_info *sbi)
+{
+	struct bio *bio;
+	struct page *page;
+	char buf[4] = { 'D', 'A', 'T', 'A', };
+
+	bio = bio_alloc(GFP_NOIO, 1);
+	bio->bi_end_io = f2fs_kv_done;
+	bio->bi_private = NULL;
+
+	f2fs_target_device(sbi, 0x20000, bio);
+
+	page = alloc_page(GFP_KERNEL);
+	memcpy(page_address(page), buf, 4);
+
+	bio_add_page(bio, page, PAGE_SIZE, 0);
+
+	bio_set_op_attrs(bio, REQ_OP_WRITE,
+			REQ_SYNC|REQ_META|REQ_FUA);
+	submit_bio(bio);
+}
+
+static void f2fs_kv_read(struct f2fs_sb_info *sbi)
+{
+	struct bio *bio;
+	struct page *page;
+
+	bio = bio_alloc(GFP_NOIO, 1);
+	bio->bi_end_io = f2fs_kv_done;
+	bio->bi_private = NULL;
+
+	f2fs_target_device(sbi, 0x180, bio);
+
+	page = alloc_page(GFP_KERNEL);
+	bio_add_page(bio, page, PAGE_SIZE, 0);
+	bio_set_op_attrs(bio, REQ_OP_READ, 0);
+
+	submit_bio(bio);
+}
+
+static void __flush_nat_entry_in_lfs(struct f2fs_sb_info *sbi)
+{
+	struct f2fs_nm_info *nm_i = NM_I(sbi);
+	struct nat_entry *natvec[NATVEC_SIZE];
+	unsigned int found;
+	nid_t nid;
+
+	while ((found = __gang_lookup_nat_cache(nm_i,
+					nid, NATVEC_SIZE, natvec))) {
+		unsigned idx;
+
+		nid = nat_get_nid(natvec[found - 1]) + 1;
+		for (idx = 0; idx < found; idx++) {
+			spin_lock(&nm_i->nat_list_lock);
+			trace_printk("NAT CACHE: nid=0x%x, ino=0x%x, blkaddr=0x%x\n",
+						natvec[idx]->ni.nid,
+						natvec[idx]->ni.ino,
+						natvec[idx]->ni.blk_addr);
+
+			/*
+			 * f2fs_kv_put(natvec[idx]->ni.nid, natvec[idx]->ni.blk_addr);
+			 */
+
+			spin_unlock(&nm_i->nat_list_lock);
+		}
+	}
+}
+
 /*
  * This function is called during the checkpointing process.
  */
@@ -3089,6 +3184,13 @@ int f2fs_flush_nat_entries(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 		!__has_cursum_space(journal,
 			nm_i->nat_cnt[DIRTY_NAT], NAT_JOURNAL))
 		remove_nats_in_journal(sbi);
+
+	/*
+	 * we should remove the following codes after this line.  We should not
+	 * rely on the page cache page-based I/O. We should flush entries to
+	 * KV.
+	 */
+	__flush_nat_entry_in_lfs(sbi);
 
 	while ((found = __gang_lookup_nat_set(nm_i,
 					set_idx, SETVEC_SIZE, setvec))) {
