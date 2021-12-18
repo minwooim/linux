@@ -20,12 +20,16 @@
 #include "iostat.h"
 #include <trace/events/f2fs.h>
 
+#include "skiplist/skiplist_api.h"
+
 #define on_f2fs_build_free_nids(nmi) mutex_is_locked(&(nm_i)->build_lock)
 
 static struct kmem_cache *nat_entry_slab;
 static struct kmem_cache *free_nid_slab;
 static struct kmem_cache *nat_entry_set_slab;
 static struct kmem_cache *fsync_node_entry_slab;
+
+static bool kv_init;
 
 static inline int get_node_info(struct f2fs_sb_info *sbi, nid_t nid,
 		struct node_info *ni, struct f2fs_nat_entry *ne)
@@ -47,9 +51,6 @@ static inline int get_node_info(struct f2fs_sb_info *sbi, nid_t nid,
 	*ne = nat_blk->entries[nid - start_nid];
 	node_info_from_raw_nat(ni, ne);
 	f2fs_put_page(page, 1);
-
-	trace_printk("GET NODE INFO: nid=0x%x, ino=0x%x, blkaddr=0x%x\n",
-			ni->nid, ni->ino, ni->blk_addr);
 
 	return 0;
 }
@@ -617,7 +618,12 @@ retry:
 
 	/* Fill node_info from nat page */
 	/* NAT entry (ro case) */
-	get_node_info(sbi, nid, ni, &ne);
+	ne = f2fs_kv_get(nid);
+	node_info_from_raw_nat(ni, &ne);
+
+	// get_node_info(sbi, nid, ni, &ne);
+	trace_printk("GET NODE INFO: nid=0x%x, ino=0x%x, blkaddr=0x%x\n",
+			ni->nid, ni->ino, ni->blk_addr);
 
 cache:
 	blkaddr = le32_to_cpu(ne.block_addr);
@@ -3121,6 +3127,7 @@ static void __flush_nat_entry_in_lfs(struct f2fs_sb_info *sbi)
 {
 	struct f2fs_nm_info *nm_i = NM_I(sbi);
 	struct nat_entry *natvec[NATVEC_SIZE];
+	struct f2fs_nat_entry e;
 	unsigned int found;
 	nid_t nid;
 
@@ -3136,9 +3143,10 @@ static void __flush_nat_entry_in_lfs(struct f2fs_sb_info *sbi)
 						natvec[idx]->ni.ino,
 						natvec[idx]->ni.blk_addr);
 
-			/*
-			 * f2fs_kv_put(natvec[idx]->ni.nid, natvec[idx]->ni.blk_addr);
-			 */
+			e.version = natvec[idx]->ni.version;
+			e.ino = natvec[idx]->ni.ino;
+			e.block_addr = natvec[idx]->ni.blk_addr;
+			f2fs_kv_put(natvec[idx]->ni.nid, e);
 
 			spin_unlock(&nm_i->nat_list_lock);
 		}
@@ -3349,6 +3357,11 @@ static int init_node_manager(struct f2fs_sb_info *sbi)
 	if (!nm_i->nat_bitmap_mir)
 		return -ENOMEM;
 #endif
+
+	if (!kv_init) {
+		f2fs_kv_init(16);
+		kv_init = true;
+	}
 
 	return 0;
 }

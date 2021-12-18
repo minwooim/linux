@@ -61,6 +61,10 @@ F2FS_NAT_Entry f2fs_kv_get(__u32 node_id) {
     if(ret != NULL) 
         memcpy(&entry, ret, sizeof(Skiplist_Entry));
 
+    trace_printk("KV GET: key=0x%x, value.version=%d, value.ino=0x%x, value.block_addr=0x%x\n",
+		    node_id, entry.nat_entry.version,
+		    entry.nat_entry.ino, entry.nat_entry.block_addr);
+
     return entry.nat_entry;
 }
 EXPORT_SYMBOL(f2fs_kv_get);
@@ -82,6 +86,9 @@ int f2fs_kv_put(__u32 node_id, F2FS_NAT_Entry entry) {
     } else { // Insert new data
         result = multi_skiplist_insert(global_skiplist, (void *)s_entry);
     }
+
+    trace_printk("KV PUT: key=0x%x, value.version=%d, value.ino=0x%x, value.block_addr=0x%x\n",
+		    node_id, entry.version, entry.ino, entry.block_addr);
     
 #ifdef _SKIPLIST_API_DEBUG
     if(result == 0) {
