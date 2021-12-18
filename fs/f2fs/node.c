@@ -3206,6 +3206,7 @@ int f2fs_flush_nat_entries(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 	 */
 	__flush_nat_entry_in_lfs(sbi);
 
+	/*
 	while ((found = __gang_lookup_nat_set(nm_i,
 					set_idx, SETVEC_SIZE, setvec))) {
 		unsigned idx;
@@ -3215,13 +3216,16 @@ int f2fs_flush_nat_entries(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 			__adjust_nat_entry_set(setvec[idx], &sets,
 						MAX_NAT_JENTRIES(journal));
 	}
+	*/
 
 	/* flush dirty nats in nat entry set */
+	/*
 	list_for_each_entry_safe(set, tmp, &sets, set_list) {
 		err = __flush_nat_entry_set(sbi, set, cpc);
 		if (err)
 			break;
 	}
+	*/
 
 	up_write(&nm_i->nat_tree_lock);
 	/* Allow dirty nats by node block allocation in write_begin */
