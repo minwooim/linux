@@ -2,7 +2,7 @@
 #define _SKIPLIST_API_H
 
 #define _SKIPLIST_API_DEBUG // Debug flag
-#define _SKIPLIST_API_F2FS
+#define SKIPLIST_API_F2FS
 
 #include <linux/kernel.h>
 #include <linux/slab.h>
