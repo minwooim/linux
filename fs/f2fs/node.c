@@ -482,6 +482,7 @@ static void set_node_addr(struct f2fs_sb_info *sbi, struct node_info *ni,
 	struct f2fs_nm_info *nm_i = NM_I(sbi);
 	struct nat_entry *e;
 	struct nat_entry *new = __alloc_nat_entry(sbi, ni->nid, true);
+	struct f2fs_nat_entry kve;
 
 	down_write(&nm_i->nat_tree_lock);
 	e = __lookup_nat_cache(nm_i, ni->nid);
@@ -520,8 +521,12 @@ static void set_node_addr(struct f2fs_sb_info *sbi, struct node_info *ni,
 
 	trace_printk("NAT ENTRY UPDATE: nid=0x%x, ino=0x%x, old=0x%x, new=0x%x\n",
 			nat_get_nid(e), nat_get_ino(e), nat_get_blkaddr(e), new_blkaddr);
+
 	/* change address */
 	nat_set_blkaddr(e, new_blkaddr);
+	raw_nat_from_node_info(&kve, &e->ni);
+	f2fs_kv_put(nat_get_nid(e), kve);
+
 	if (!__is_valid_data_blkaddr(new_blkaddr))
 		set_nat_flag(e, IS_CHECKPOINTED, false);
 	__set_nat_cache_dirty(nm_i, e);
