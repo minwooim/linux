@@ -9,16 +9,13 @@
 #include "multi_skiplist.h"
 #include "common_define.h"
 
+#include <linux/f2fs_fs.h>
+
 typedef struct {
     int node_id;
     void *blk_addr;
 }NAT_Entry;
 
-struct f2fs_nat_entry {
-    __u8 version;
-    __u32 ino;
-    __u32 block_addr;
-};
 typedef struct f2fs_nat_entry F2FS_NAT_Entry;
 
 typedef struct {

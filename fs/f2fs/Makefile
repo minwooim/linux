@@ -6,7 +6,7 @@ ccflags-y += -O0
 f2fs-y		:= dir.o file.o inode.o namei.o hash.o super.o inline.o
 f2fs-y		+= checkpoint.o gc.o data.o node.o segment.o recovery.o
 f2fs-y		+= shrinker.o extent_cache.o sysfs.o
-f2fs-y		+= skiplist/fast_mblock.o skiplist/fc_memory.c skiplist/multi_skiplist.o
+f2fs-y		+= skiplist/fast_mblock.o skiplist/fc_memory.o skiplist/multi_skiplist.o
 f2fs-y		+= skiplist/skiplist_api.o skiplist/common_define.o
 
 f2fs-$(CONFIG_F2FS_STAT_FS) += debug.o
