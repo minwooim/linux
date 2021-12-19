@@ -14,6 +14,16 @@ BlockAddressNode *flushed_head;
 // ThreadNode *kthread_head;
 struct mutex check_lock;
 
+/*
+ * Superblock information object from the F2FS node manager initialization.
+ * We only have this single instance which means we only support for single
+ * mount file system for now.
+ */
+
+void f2fs_kv_flush(void *s, void *arr, int size, unsigned int *blkaddr);
+void f2fs_kv_read(struct page *page, void *s, unsigned int blkaddr);
+static struct f2fs_sb_info *sbi;
+
 
 const char *f2fs_kv_entry_to_string(void *data, char *buff, const int size) {
     Skiplist_Entry *entry = (Skiplist_Entry *)data;
@@ -42,15 +52,23 @@ int f2fs_kv_flush_thread(void *arg) {
     // ThreadNode *my_node = ((ThreadArgs *)arg)->node;
     // ThreadNode *tnode_it;
     BlockAddressNode *node;
-    void *blk_addr = NULL; // Block address returned by I/O
+    u32 blkaddr;
     int arr_size = 0;
-    void *array = kmalloc(DATA_ARRAY_SIZE, GFP_KERNEL);
+    int nr_pages = max(DATA_ARRAY_SIZE / PAGE_SIZE, 1);
+    struct page *page;
+    void *array;
 #ifdef _SKIPLIST_API_DEBUG
     Skiplist_Entry tmp_entry;
-    int i;
 #endif
     printk("Entered flush thread, array: %px / sl=%px\n", array, sl);
     // printk("arg: sl=%px, my_node=%px\n", sl, my_node);
+    int i;
+
+    nr_pages = max(ilog2(nr_pages), 1);
+    page = alloc_pages(GFP_KERNEL, max(ilog2(nr_pages), 1));
+    nr_pages = 1 << nr_pages;
+
+    array = page_address(page);
 
     arr_size = multi_skiplist_to_array(sl, array);
 #ifdef _SKIPLIST_API_DEBUG
@@ -62,16 +80,16 @@ int f2fs_kv_flush_thread(void *arg) {
     }
 #endif
 
-    // Post array pointer & get block address
-    //   ...
-    blk_addr = (void *)0xdeadbeef;
+    f2fs_kv_flush(sbi, array, nr_pages, &blkaddr);
 
     // Add BlockAddressNode to the global linked list's head
     node = (BlockAddressNode *)kmalloc(sizeof(BlockAddressNode), GFP_KERNEL);
-    node->block_address = blk_addr;
+    node->block_address = (void *) blkaddr;
     node->size = arr_size;
     node->prev = NULL;
     
+    trace_printk("KV flushed to blkaddr=0x%x\n", blkaddr);
+
     if(flushed_head != NULL) {
         node->next = flushed_head;
         flushed_head->prev = node;
@@ -136,6 +154,12 @@ int f2fs_kv_init(const int level_count) {
 }
 EXPORT_SYMBOL(f2fs_kv_init);
 
+int f2fs_kv_init_sbi(const int level_count, void *_sbi)
+{
+	sbi = _sbi;
+	return f2fs_kv_init(level_count);
+}
+
 
 F2FS_NAT_Entry f2fs_kv_get(__u32 node_id) {
     Skiplist_Entry entry = {0, {0,0,0}};
@@ -143,6 +167,8 @@ F2FS_NAT_Entry f2fs_kv_get(__u32 node_id) {
     int i;
     BlockAddressNode *it;
     bool is_found = false;
+    struct page *page;
+    Skiplist_Entry *e;
 
     entry.nid = node_id;
     ret = multi_skiplist_find(global_skiplist, (void *)(&entry));
@@ -158,7 +184,10 @@ F2FS_NAT_Entry f2fs_kv_get(__u32 node_id) {
 #ifdef _SKIPLIST_API_DEBUG
             printk("Skiplist | Try to read block_addr %px\n", it->block_address);
 #endif
-            blk_buf = 0; // Read from block address here...
+            page = alloc_pages(GFP_KERNEL, 0);
+	    f2fs_kv_read(page, sbi, it->block_address);
+	    blk_buf = page_address(page);
+	    e = blk_buf;
 
             if(blk_buf != 0)
             for(i=0; i<(it->size/sizeof(Skiplist_Entry)); i++) {
@@ -183,6 +212,7 @@ F2FS_NAT_Entry f2fs_kv_get(__u32 node_id) {
 
 #endif
 
+    kfree(blk_buf);
     trace_printk("KV GET: key=0x%x, value.version=%d, value.ino=0x%x, value.block_addr=0x%x\n",
 		    node_id, entry.nat_entry.version,
 		    entry.nat_entry.ino, entry.nat_entry.block_addr);

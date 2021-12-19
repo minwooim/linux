@@ -3086,47 +3086,62 @@ static void f2fs_kv_done(struct bio *bio)
 	bio_for_each_bvec(bvec, bio, iter)
 		__free_page(bvec.bv_page);
 
+	complete((struct completion *)bio->bi_private);
 	bio_put(bio);
 }
 
-static void f2fs_kv_flush(struct f2fs_sb_info *sbi)
+static block_t _blkaddr;
+void f2fs_kv_flush(void *s, void *arr, int size,
+		unsigned int *blkaddr)
 {
+	struct f2fs_sb_info *sbi = (struct f2fs_sb_info *) s;
 	struct bio *bio;
-	struct page *page;
-	char buf[4] = { 'D', 'A', 'T', 'A', };
+	struct page *page = virt_to_page(arr);
+	struct completion event;
+	int i;
+
+	init_completion(&event);
 
 	bio = bio_alloc(GFP_NOIO, 1);
 	bio->bi_end_io = f2fs_kv_done;
-	bio->bi_private = NULL;
+	bio->bi_private = &event;
 
-	f2fs_target_device(sbi, 0x20000, bio);
+	/*
+	 * 0x1f6000 is a start LBA address of zone 251.
+	 * Zone 251 - 255 (5 zones) are used for the NAT meta pages writes.
+	 */
+	if (!_blkaddr)
+		_blkaddr = FDEV(1).start_blk + 0x1f6000;
+	else
+		_blkaddr += 1;
 
-	page = alloc_page(GFP_KERNEL);
-	memcpy(page_address(page), buf, 4);
-
+	f2fs_target_device(sbi, _blkaddr, bio);
 	bio_add_page(bio, page, PAGE_SIZE, 0);
-
-	bio_set_op_attrs(bio, REQ_OP_WRITE,
-			REQ_SYNC|REQ_META|REQ_FUA);
+	bio_set_op_attrs(bio, REQ_OP_WRITE, REQ_SYNC|REQ_META|REQ_FUA);
 	submit_bio(bio);
+	wait_for_completion(&event);
+
+	*blkaddr = _blkaddr - FDEV(1).start_blk;
 }
 
-static void f2fs_kv_read(struct f2fs_sb_info *sbi)
+void f2fs_kv_read(struct page *page, void *s, unsigned int blkaddr)
 {
+	struct f2fs_sb_info *sbi = (struct f2fs_sb_info *) s;
 	struct bio *bio;
-	struct page *page;
+	struct completion event;
+
+	init_completion(&event);
 
 	bio = bio_alloc(GFP_NOIO, 1);
 	bio->bi_end_io = f2fs_kv_done;
-	bio->bi_private = NULL;
+	bio->bi_private = &event;
 
-	f2fs_target_device(sbi, 0x180, bio);
-
-	page = alloc_page(GFP_KERNEL);
+	f2fs_target_device(sbi, FDEV(1).start_blk + blkaddr, bio);
 	bio_add_page(bio, page, PAGE_SIZE, 0);
 	bio_set_op_attrs(bio, REQ_OP_READ, 0);
-
 	submit_bio(bio);
+
+	wait_for_completion(&event);
 }
 
 static void __flush_nat_entry_in_lfs(struct f2fs_sb_info *sbi)
@@ -3369,7 +3384,7 @@ static int init_node_manager(struct f2fs_sb_info *sbi)
 #endif
 
 	if (!kv_init) {
-		f2fs_kv_init(16);
+		f2fs_kv_init_sbi(16, sbi);
 		kv_init = true;
 	}
 

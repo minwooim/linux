@@ -59,6 +59,7 @@ typedef struct _ThreadNode{
  * @return int, < 0 if failed.
  */
 int f2fs_kv_init(const int level_count);
+int f2fs_kv_init_sbi(const int level_count, void *_sbi);
 
 /**
  * @brief Destroy global skiplist.
