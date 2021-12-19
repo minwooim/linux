@@ -28,7 +28,7 @@
 #include "skiplist_api.h"
 
 #define IMMUTABLE_SIZE 128 * 1024 * 1024
-#define DATA_ARRAY_SIZE 64
+#define DATA_ARRAY_SIZE 4 * 1024
 
 typedef struct multi_skiplist_data
 {
