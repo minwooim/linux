@@ -223,7 +223,6 @@ static void f2fs_kv_flush_thread(struct work_struct *work_data) {
     // my_node->next = tnode_it;
     
     kfree(work_data);
-    printk("Flush | Flush thread end\n");
     // return 0;
 }
 
@@ -399,11 +398,6 @@ int f2fs_kv_put(__u32 node_id, F2FS_NAT_Entry entry) {
             global_skiplist = (MultiSkiplist *)kmalloc(sizeof(MultiSkiplist), GFP_ATOMIC);
             result = multi_skiplist_init(global_skiplist, sl_max_level, 
                 f2fs_kv_compare_func, f2fs_kv_free_func);
-            if(result != 0) {
-                printk(KERN_ERR "Global skiplist init. failed: %d\n", result);
-            } else {
-                printk("Global skiplist init. success, sl: %px, top: %px\n", global_skiplist, global_skiplist->top);
-            }
             cur_entry_num = 0;
         }
         cur_entry_num++;
