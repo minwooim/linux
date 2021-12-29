@@ -102,9 +102,11 @@ EXPORT_SYMBOL_GPL(__blk_req_zone_write_lock);
 void __blk_req_zone_write_unlock(struct request *rq)
 {
 	rq->rq_flags &= ~RQF_ZONE_WRITE_LOCKED;
-	if (rq->q->seq_zones_wlock)
+	if (rq->q->seq_zones_wlock) {
 		WARN_ON_ONCE(!test_and_clear_bit(blk_rq_zone_no(rq),
 						 rq->q->seq_zones_wlock));
+		trace_printk("CLEAR, zone=%d\n", blk_rq_zone_no(rq));
+	}
 }
 EXPORT_SYMBOL_GPL(__blk_req_zone_write_unlock);
 

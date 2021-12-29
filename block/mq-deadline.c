@@ -283,7 +283,7 @@ static inline int deadline_check_fifo(struct dd_per_prio *per_prio,
  */
 static struct request *
 deadline_fifo_request(struct deadline_data *dd, struct dd_per_prio *per_prio,
-		      enum dd_data_dir data_dir)
+		      enum dd_data_dir data_dir, int i)
 {
 	struct request *rq;
 	unsigned long flags;
@@ -300,9 +300,23 @@ deadline_fifo_request(struct deadline_data *dd, struct dd_per_prio *per_prio,
 	 * an unlocked target zone.
 	 */
 	spin_lock_irqsave(&dd->zone_lock, flags);
+	if (i) {
+		trace_printk("-------------------------\n");
+		list_for_each_entry(rq, &per_prio->fifo_list[DD_WRITE], queuelist) {
+			trace_printk("rq->pos=%d, zone=%d, locked=%d\n",
+					blk_rq_trace_sector(rq),
+					blk_rq_zone_no(rq),
+					blk_req_zone_is_write_locked(rq));
+		}
+		trace_printk("-------------------------\n");
+	}
 	list_for_each_entry(rq, &per_prio->fifo_list[DD_WRITE], queuelist) {
 		if (blk_req_can_dispatch_to_zone(rq))
 			goto out;
+		else {
+			if (i)
+				trace_printk("cannot, rq->pos=%d\n", blk_rq_trace_sector(rq));
+		}
 	}
 	rq = NULL;
 out:
@@ -370,6 +384,7 @@ static struct request *__dd_dispatch_request(struct deadline_data *dd,
 	enum dd_data_dir data_dir;
 	enum dd_prio prio;
 	u8 ioprio_class;
+	int where = 0;
 
 	lockdep_assert_held(&dd->lock);
 
@@ -386,9 +401,11 @@ static struct request *__dd_dispatch_request(struct deadline_data *dd,
 	 * batches are currently reads XOR writes
 	 */
 	rq = deadline_next_request(dd, per_prio, dd->last_dir);
-	if (rq && dd->batching < dd->fifo_batch)
+	if (rq && dd->batching < dd->fifo_batch) {
 		/* we have a next request are still entitled to batch */
+		where = 1;
 		goto dispatch_request;
+	}
 
 	/*
 	 * at this point we are not running a batch. select the appropriate
@@ -398,7 +415,7 @@ static struct request *__dd_dispatch_request(struct deadline_data *dd,
 	if (!list_empty(&per_prio->fifo_list[DD_READ])) {
 		BUG_ON(RB_EMPTY_ROOT(&per_prio->sort_list[DD_READ]));
 
-		if (deadline_fifo_request(dd, per_prio, DD_WRITE) &&
+		if (deadline_fifo_request(dd, per_prio, DD_WRITE, 0) &&
 		    (dd->starved++ >= dd->writes_starved))
 			goto dispatch_writes;
 
@@ -435,13 +452,15 @@ dispatch_find_request:
 		 * direction, or we have run out of higher-sectored requests.
 		 * Start again from the request with the earliest expiry time.
 		 */
-		rq = deadline_fifo_request(dd, per_prio, data_dir);
+		rq = deadline_fifo_request(dd, per_prio, data_dir, 1);
+		where = 2;
 	} else {
 		/*
 		 * The last req was the same dir and we have a next request in
 		 * sort order. No expired requests so continue on from here.
 		 */
 		rq = next_rq;
+		where =3;
 	}
 
 	/*
@@ -450,6 +469,8 @@ dispatch_find_request:
 	 */
 	if (!rq)
 		return NULL;
+
+	trace_printk("where=%d, pos=%d\n", where, blk_rq_trace_sector(rq));
 
 	dd->last_dir = data_dir;
 	dd->batching = 0;
