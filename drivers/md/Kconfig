@@ -644,6 +644,11 @@ config DM_ZONED
 
 	  If unsure, say N.
 
+config DM_SMALLZONE
+	tristate "Host-managed small-zone zoned block device"
+	depends on BLK_DEV_DM
+	depends on BLK_DEV_ZONED
+
 config DM_AUDIT
 	bool "DM audit events"
 	depends on AUDIT

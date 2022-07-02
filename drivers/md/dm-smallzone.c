@@ -106,7 +106,12 @@ int __init dm_smallzone_init(void)
         return 0;
 }
 
-void dm_smallzone_exit(void)
+void __exit dm_smallzone_exit(void)
 {
         dm_unregister_target(&smallzone);
 }
+
+module_init(dm_smallzone_init);
+module_exit(dm_smallzone_exit);
+
+MODULE_LICENSE("GPL");
