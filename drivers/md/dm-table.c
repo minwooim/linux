@@ -258,23 +258,6 @@ static int device_area_is_invalid(struct dm_target *ti, struct dm_dev *dev,
 			       zone_sectors, bdev);
 			return 1;
 		}
-
-		/*
-		 * Note: The last zone of a zoned block device may be smaller
-		 * than other zones. So for a target mapping the end of a
-		 * zoned block device with such a zone, len would not be zone
-		 * aligned. We do not allow such last smaller zone to be part
-		 * of the mapping here to ensure that mappings with multiple
-		 * devices do not end up with a smaller zone in the middle of
-		 * the sector range.
-		 */
-		if (len & (zone_sectors - 1)) {
-			DMWARN("%s: len=%llu not aligned to h/w zone size %u of %pg",
-			       dm_device_name(ti->table->md),
-			       (unsigned long long)len,
-			       zone_sectors, bdev);
-			return 1;
-		}
 	}
 
 	if (logical_block_size_sectors <= 1)
@@ -1638,10 +1621,6 @@ static int validate_hardware_zoned_model(struct dm_table *table,
 		      dm_device_name(table->md));
 		return -EINVAL;
 	}
-
-	/* Check zone size validity and compatibility */
-	if (!zone_sectors || !is_power_of_2(zone_sectors))
-		return -EINVAL;
 
 	if (dm_table_any_dev_attr(table, device_not_matches_zone_sectors, &zone_sectors)) {
 		DMERR("%s: zone sectors is not consistent across all zoned devices",
