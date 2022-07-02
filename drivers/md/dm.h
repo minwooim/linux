@@ -192,6 +192,9 @@ void dm_linear_exit(void);
 int dm_stripe_init(void);
 void dm_stripe_exit(void);
 
+int dm_smallzone_init(void);
+void dm_smallzone_exit(void);
+
 /*
  * mapped_device operations
  */

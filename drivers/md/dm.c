@@ -258,6 +258,7 @@ static int (*_inits[])(void) __initdata = {
 	dm_kcopyd_init,
 	dm_interface_init,
 	dm_statistics_init,
+	dm_smallzone_init,
 };
 
 static void (*_exits[])(void) = {
@@ -269,6 +270,7 @@ static void (*_exits[])(void) = {
 	dm_kcopyd_exit,
 	dm_interface_exit,
 	dm_statistics_exit,
+	dm_smallzone_exit,
 };
 
 static int __init dm_init(void)
