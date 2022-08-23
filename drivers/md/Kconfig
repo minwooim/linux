@@ -654,6 +654,11 @@ config DM_ZONED
 
 	  If unsure, say N.
 
+config DM_STRIPEDZONE
+	tristate "Striped zone for small-zone ZNS devices"
+	depends on BLK_DEV_DM
+	depends on BLK_DEV_ZONED
+
 config DM_AUDIT
 	bool "DM audit events"
 	depends on AUDIT
