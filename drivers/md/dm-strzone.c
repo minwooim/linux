@@ -189,18 +189,6 @@ struct strzone_lmap *strzone_lmap_search(struct rb_root *root, u64 slba)
       return NULL;
 }
 
-static void strzone_lmap_dump(struct strzone_metadata *meta)
-{
-	struct rb_node *node;
-
-	for (node = rb_first(&meta->lmap_root); node; node = rb_next(node)) {
-		struct strzone_lmap *lmap =
-			rb_entry(node, struct strzone_lmap, node);
-		pr_info("\tslba=0x%llx\n", lmap->slba);
-	}
-	pr_info("\n");
-}
-
 static struct strzone_zone *__strzone_alloc_free_zone(struct strzone_metadata *meta)
 {
 	struct strzone_zone *zone;
