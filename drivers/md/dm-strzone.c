@@ -349,6 +349,8 @@ static void __strzone_alloc_io_write(struct bio *bio, struct strzone_io *io)
 		if (remaining)
 			bio_advance(orig_bio, chunk_sectors << SECTOR_SHIFT);
 	}
+
+	bio_put(orig_bio);
 }
 
 static void __strzone_alloc_io_read(struct strzone_io *io,
@@ -389,7 +391,10 @@ static void __strzone_alloc_io_read(struct strzone_io *io,
 		if (remaining)
 			bio_advance(orig_bio, clone->bi_iter.bi_size);
 
+		kfree(extent);
 	}
+
+	bio_put(orig_bio);
 }
 
 static struct strzone_io *strzone_alloc_io(struct strzone_target *szt,
