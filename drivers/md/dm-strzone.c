@@ -12,6 +12,9 @@
 static unsigned int chunk_size = 128 * KB;
 module_param(chunk_size, uint, 0644);
 
+static int max_open_zones = 384;
+module_param(max_open_zones, int, 0644);
+
 enum {
 	DM_STRZONE_GREEDY,
 };
@@ -43,6 +46,7 @@ struct strzone_metadata {
 	struct list_head full_zones_list;
 
 	struct rb_root lmap_root;
+	atomic_t zone_tokens;
 };
 
 struct strzone_target {
@@ -105,6 +109,8 @@ static inline const char *bio_op_name(struct bio *bio)
 		return "UNKNOWN";
 	}
 }
+static int strzone_get_extents(struct strzone_target *szt, u64 slba, u32 nlb,
+		struct xarray *extents);
 
 static inline u64 zone_to_lba(struct strzone_zone *zone)
 {
@@ -193,10 +199,15 @@ static struct strzone_zone *__strzone_alloc_free_zone(struct strzone_metadata *m
 {
 	struct strzone_zone *zone;
 
+	if (atomic_dec_if_positive(&meta->zone_tokens) < 0)
+		return NULL;
+
 	zone = list_first_entry_or_null(&meta->free_zones_list,
 			struct strzone_zone, list);
-	if (zone)
+	if (zone) {
 		list_del_init(&zone->list);
+		pr_info("dm-strzone: free zone allocated %u\n", zone->id);
+	}
 
 	return zone;
 }
@@ -207,8 +218,10 @@ static struct strzone_zone *__strzone_alloc_partial_zone(struct strzone_metadata
 
 	zone = list_first_entry_or_null(&meta->partial_zones_list,
 			struct strzone_zone, list);
-	if (zone)
+	if (zone) {
 		list_del_init(&zone->list);
+		pr_info("dm-strzone: parital zone allocated %u\n", zone->id);
+	}
 
 	return zone;
 }
@@ -240,9 +253,10 @@ static void strzone_done_zone(struct strzone_zone *zone, u32 nlb)
 
 	zone->wp += nlb;
 
-	if (zone_remaining_sectors(zone) < to_sector(chunk_size))
+	if (zone_remaining_sectors(zone) < to_sector(chunk_size)) {
 		list_add_tail(&zone->list, &meta->full_zones_list);
-	else
+		atomic_inc(&meta->zone_tokens);
+	} else
 		list_add_tail(&zone->list, &meta->partial_zones_list);
 }
 
@@ -254,18 +268,15 @@ static inline struct strzone_tio *clone_to_tio(struct bio *clone)
 static void strzone_bio_endio(struct strzone_io *io)
 {
 	struct bio *bio = io->orig_bio;
-	int i;
 
-	for (i = 0; i < io->stripe_count; i++)
-		bio_put(io->clone[i]);
-
-	bio_endio(bio);
 	pr_info("dm-strzone: %s: bio_endio(%p): op=%s, bi_sector=%lld(LBA %lld), bi_size=%u bytes(NLB %lld)\n",
 			io->szt->dev->name, bio, bio_op_name(bio),
 			bio->bi_iter.bi_sector,
 			sector_to_lba(io->szt, bio->bi_iter.bi_sector),
 			bio->bi_iter.bi_size,
 			sector_to_lba(io->szt, to_sector(bio->bi_iter.bi_size)));
+
+	bio_endio(bio);
 }
 
 static void strzone_dec_pending(struct strzone_io *io)
@@ -276,7 +287,7 @@ static void strzone_dec_pending(struct strzone_io *io)
 
 static void strzone_clone_endio(struct bio *bio)
 {
-	struct strzone_tio *tio = container_of(bio, struct strzone_tio, clone);
+	struct strzone_tio *tio = clone_to_tio(bio);
 	struct strzone_io *io = tio->io;
 	struct strzone_target *szt = io->szt;
 	struct strzone_zone *zone = bio->bi_private;
@@ -290,12 +301,13 @@ static void strzone_clone_endio(struct bio *bio)
 
 	if (zone && bio->bi_status == BLK_STS_OK)
 		strzone_done_zone(zone, sector_to_nlb(szt, bio_sectors(bio)));
+	bio_put(bio);
 	strzone_dec_pending(io);
 }
 
 static void strzone_submit_bio_remap(struct bio *clone)
 {
-	struct strzone_tio *tio = container_of(clone, struct strzone_tio, clone);
+	struct strzone_tio *tio = clone_to_tio(clone);
 	struct strzone_io *io = tio->io;
 	struct strzone_target *szt = io->szt;
 
@@ -309,15 +321,25 @@ static void strzone_submit_bio_remap(struct bio *clone)
 	submit_bio_noacct(clone);
 }
 
-static void __strzone_alloc_io_write(struct bio *bio, struct strzone_io *io)
+static int __strzone_alloc_io_write(struct bio *bio, struct strzone_io *io)
 {
 	struct strzone_target *szt = io->szt;
 	const sector_t chunk_sectors = chunk_size >> SECTOR_SHIFT;
 	unsigned int size = bio->bi_iter.bi_size;
 	unsigned int stripe_count = DIV_ROUND_UP(size, chunk_size);
+	u64 slba = sector_to_lba(szt, io->orig_bio->bi_iter.bi_sector);
+	u32 nlb = sector_to_nlb(szt, bio_sectors(io->orig_bio));
 	sector_t remaining = to_sector(size);
 	struct bio *orig_bio;
 	int i;
+	struct xarray extents;
+
+	xa_init(&extents);
+
+	if (strzone_get_extents(szt, slba, nlb, &extents)) {
+		xa_destroy(&extents);
+		return -EINVAL;
+	}
 
 	/*
 	 * Clone the original bio to split it to multiple clone bios.
@@ -341,7 +363,7 @@ static void __strzone_alloc_io_write(struct bio *bio, struct strzone_io *io)
 
 		bio_set_dev(clone, szt->dev->bdev);
 
-		tio = container_of(clone, struct strzone_tio, clone);
+		tio = clone_to_tio(clone);
 		tio->io = io;
 		io->clone[i] = clone;
 
@@ -350,7 +372,9 @@ static void __strzone_alloc_io_write(struct bio *bio, struct strzone_io *io)
 			bio_advance(orig_bio, chunk_sectors << SECTOR_SHIFT);
 	}
 
+	xa_destroy(&extents);
 	bio_put(orig_bio);
+	return 0;
 }
 
 static void __strzone_alloc_io_read(struct strzone_io *io,
@@ -363,7 +387,7 @@ static void __strzone_alloc_io_read(struct strzone_io *io,
 	unsigned long idx;
 	strzone_extent *extent;
 
-	orig_bio = bio_alloc_clone(NULL, bio, GFP_NOIO, &io->szt->bio_set);
+	orig_bio = bio_alloc_clone(NULL, bio, GFP_NOIO, &szt->bio_set);
 
 	io->stripe_count = nr_extents;
 	atomic_set(&io->io_count, io->stripe_count);
@@ -383,7 +407,7 @@ static void __strzone_alloc_io_read(struct strzone_io *io,
 
 		bio_set_dev(clone, szt->dev->bdev);
 
-		tio = container_of(clone, struct strzone_tio, clone);
+		tio = clone_to_tio(clone);
 		tio->io = io;
 		io->clone[idx] = clone;
 
@@ -393,7 +417,6 @@ static void __strzone_alloc_io_read(struct strzone_io *io,
 
 		kfree(extent);
 	}
-
 	bio_put(orig_bio);
 }
 
@@ -401,13 +424,19 @@ static struct strzone_io *strzone_alloc_io(struct strzone_target *szt,
 		struct bio *bio)
 {
 	struct strzone_io *io;
+	int err = 0;
 
 	io = kzalloc(sizeof(struct strzone_io), GFP_KERNEL);
 	io->szt = szt;
 	io->orig_bio = bio;
 
 	if (bio_op(bio) == REQ_OP_WRITE)
-		__strzone_alloc_io_write(bio, io);
+		err = __strzone_alloc_io_write(bio, io);
+
+	if (err) {
+		kfree(io);
+		return NULL;
+	}
 
 	return io;
 }
@@ -456,8 +485,12 @@ static struct strzone_lmap *strzone_remap_write(struct strzone_io *io)
 
 	for (i = 0; i < lmap->nr_pmaps; i++) {
 		struct bio *clone = io->clone[i];
-		struct strzone_zone *zone = strzone_alloc_zone(szt->metadata);
-		BUG_ON(!zone);
+		struct strzone_zone *zone;
+		
+retry:
+		zone = strzone_alloc_zone(szt->metadata);
+		if (!zone)
+			goto retry;
 
 		clone->bi_iter.bi_sector = lba_to_sector(szt, zone->wp);
 		clone->bi_private = zone;
@@ -559,8 +592,12 @@ static int strzone_submit(struct strzone_target *szt, struct bio *bio)
 {
 	struct strzone_io *io = strzone_alloc_io(szt, bio);
 
-	strzone_remap(io);
-	return strzone_submit_bios(io);
+	if (io) {
+		strzone_remap(io);
+		return strzone_submit_bios(io);
+	}
+
+	return DM_MAPIO_KILL;
 }
 
 static int strzone_map(struct dm_target *ti, struct bio *bio)
@@ -643,6 +680,12 @@ static int strzone_init_metadata(struct strzone_target *szt)
 	if (!meta)
 		return -ENOMEM;
 	meta->lmap_root = RB_ROOT;
+	/*
+	 * XXX: bdev_max_open_zones(bdev) returns 0 due to the dm-po2zone.
+	 * Once dm-po2zone (dm-0) sets proper attribute value, then we can use
+	 * the API here.
+	 */
+	atomic_set(&meta->zone_tokens, max_open_zones);
 
 	szt->metadata = meta;
 
@@ -657,8 +700,9 @@ static int strzone_init_metadata(struct strzone_target *szt)
 		return ret;
 	}
 
-	pr_info("dm-strzone: %s: Initialized zones %u\n", szt->dev->name,
-			szt->nr_zones);
+	pr_info("dm-strzone: %s: Initialized zones %u (max_open_zones %u)\n",
+			szt->dev->name, szt->nr_zones,
+			atomic_read(&meta->zone_tokens));
 
 	return 0;
 }
@@ -694,15 +738,16 @@ static int strzone_ctr(struct dm_target *ti, unsigned int argc,
 	 * zone capacity will be filled up in a report-zone stage.
 	 */
 	szt->zone_capacity = 0;
-	front_pad = __alignof__(struct strzone_tio) + DM_STRZONE_TIO_BIO_OFFSET;
-	if (bioset_init(&szt->bio_set, 8192, front_pad, 0))
+	front_pad = DM_STRZONE_TIO_BIO_OFFSET;
+	if (bioset_init(&szt->bio_set, 4096, front_pad, 0))
 		goto out;
 
         ti->private = szt;
 
 	strzone_init_metadata(szt);
 
-	pr_info("dm-strzone: %s: chunk_size=%u bytes, zone_size=%lld bytes, zone_capacity=%lld bytes\n", szt->dev->name, chunk_size,
+	pr_info("dm-strzone: %s: chunk_size=%u bytes, zone_size=%lld bytes, zone_capacity=%lld bytes\n",
+			szt->dev->name, chunk_size,
 			szt->zone_size << SECTOR_SHIFT,
 			szt->zone_capacity << SECTOR_SHIFT);
 
