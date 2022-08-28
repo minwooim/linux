@@ -411,6 +411,47 @@ static void strzone_submit_bio_remap(struct bio *clone)
 	submit_bio_noacct(clone);
 }
 
+static struct strzone_lmap *strzone_alloc_lmap(struct strzone_io *io)
+{
+	struct strzone_target *szt = io->szt;
+	u64 slba = sector_to_lba(szt, io->orig_bio->bi_iter.bi_sector);
+	u32 nlb = sector_to_nlb(szt, bio_sectors(io->orig_bio));
+	struct strzone_lmap *lmap;
+
+	lmap = kmalloc(sizeof(struct strzone_lmap), GFP_KERNEL);
+	if (!lmap)
+		return NULL;
+
+	lmap->slba = slba;
+	lmap->nlb = nlb;
+	lmap->nr_pmaps = io->stripe_count;
+	lmap->pmap = kmalloc(sizeof(struct strzone_pmap) * lmap->nr_pmaps,
+			GFP_KERNEL);
+	if (!lmap->pmap) {
+		kfree(lmap);
+		return NULL;
+	}
+
+	return lmap;
+}
+
+static void strzone_remap_write(struct strzone_io *io, int index,
+		struct bio *clone)
+{
+	struct strzone_target *szt = io->szt;
+	struct strzone_zone *zone;
+
+retry:
+	zone = strzone_alloc_zone(szt->metadata);
+	if (!zone)
+		goto retry;
+
+	clone->bi_iter.bi_sector = lba_to_sector(szt, zone->wp);
+	clone->bi_private = zone;
+	io->lmap->pmap[index].slba = zone->wp;
+	io->lmap->pmap[index].nlb = sector_to_nlb(szt, bio_sectors(clone));
+}
+
 static int __strzone_alloc_io_write(struct bio *bio, struct strzone_io *io)
 {
 	struct strzone_target *szt = io->szt;
@@ -441,6 +482,8 @@ static int __strzone_alloc_io_write(struct bio *bio, struct strzone_io *io)
 	io->clone = kmalloc(sizeof(struct bio *) * io->stripe_count,
 			GFP_KERNEL);
 
+	io->lmap = strzone_alloc_lmap(io);
+
 	for (i = 0; i < io->stripe_count; i++) {
 		struct strzone_tio *tio;
 		struct bio *clone;
@@ -457,10 +500,16 @@ static int __strzone_alloc_io_write(struct bio *bio, struct strzone_io *io)
 		tio->io = io;
 		io->clone[i] = clone;
 
+		strzone_remap_write(io, i, clone);
+
 		remaining -= to_sector(clone->bi_iter.bi_size);
 		if (remaining)
 			bio_advance(orig_bio, chunk_sectors << SECTOR_SHIFT);
+
+		strzone_submit_bio_remap(clone);
 	}
+
+	strzone_lmap_insert(szt->metadata, io->lmap);
 
 	xa_destroy(&extents);
 	bio_put(orig_bio);
@@ -501,6 +550,8 @@ static void __strzone_alloc_io_read(struct strzone_io *io,
 		tio->io = io;
 		io->clone[idx] = clone;
 
+		strzone_submit_bio_remap(clone);
+
 		remaining -= to_sector(clone->bi_iter.bi_size);
 		if (remaining)
 			bio_advance(orig_bio, clone->bi_iter.bi_size);
@@ -534,7 +585,6 @@ static struct strzone_io *strzone_alloc_io(struct strzone_target *szt,
 static void strzone_submit_bios(struct strzone_io *io)
 {
 	struct strzone_target *szt = io->szt;
-	int i;
 
 	/*
 	 * `stripe_count == 0` means no mapping found.  system-udevd reads at
@@ -555,50 +605,7 @@ static void strzone_submit_bios(struct strzone_io *io)
 		return;
 	}
 
-	for (i = 0; i < io->stripe_count; i++)
-		strzone_submit_bio_remap(io->clone[i]);
-
 	return;
-}
-
-static struct strzone_lmap *strzone_remap_write(struct strzone_io *io)
-{
-	struct strzone_target *szt = io->szt;
-	u64 slba = sector_to_lba(szt, io->orig_bio->bi_iter.bi_sector);
-	u32 nlb = sector_to_nlb(szt, bio_sectors(io->orig_bio));
-	struct strzone_lmap *lmap;
-	int i;
-
-	lmap = kmalloc(sizeof(struct strzone_lmap), GFP_KERNEL);
-	if (!lmap)
-		return NULL;
-
-	lmap->slba = slba;
-	lmap->nlb = nlb;
-	lmap->nr_pmaps = io->stripe_count;
-	lmap->pmap = kmalloc(sizeof(struct strzone_pmap) * lmap->nr_pmaps,
-			GFP_KERNEL);
-	if (!lmap->pmap) {
-		kfree(lmap);
-		return NULL;
-	}
-
-	for (i = 0; i < lmap->nr_pmaps; i++) {
-		struct bio *clone = io->clone[i];
-		struct strzone_zone *zone;
-		
-retry:
-		zone = strzone_alloc_zone(szt->metadata);
-		if (!zone)
-			goto retry;
-
-		clone->bi_iter.bi_sector = lba_to_sector(szt, zone->wp);
-		clone->bi_private = zone;
-		lmap->pmap[i].slba = zone->wp;
-		lmap->pmap[i].nlb = sector_to_nlb(szt, bio_sectors(clone));
-	}
-
-	return lmap;
 }
 
 static int strzone_get_extents(struct strzone_target *szt, u64 slba, u32 nlb,
@@ -678,14 +685,8 @@ static void strzone_remap_read(struct strzone_io *io)
 
 static void strzone_remap(struct strzone_io *io)
 {
-	struct strzone_target *szt = io->szt;
-
-	if (bio_op(io->orig_bio) == REQ_OP_WRITE) {
-		io->lmap = strzone_remap_write(io);
-		strzone_lmap_insert(szt->metadata, io->lmap);
-	} else if (bio_op(io->orig_bio) == REQ_OP_READ) {
+	if (bio_op(io->orig_bio) == REQ_OP_READ)
 		strzone_remap_read(io);
-	}
 }
 
 static int strzone_submit(struct strzone_target *szt, struct bio *bio)
