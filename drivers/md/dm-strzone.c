@@ -15,6 +15,9 @@ module_param(chunk_size, uint, 0644);
 static int max_open_zones = 384;
 module_param(max_open_zones, int, 0644);
 
+static void strzone_work(struct work_struct *work);
+static struct workqueue_struct *strzone_wq;
+
 enum {
 	DM_STRZONE_GREEDY,
 };
@@ -49,6 +52,11 @@ struct strzone_metadata {
 	atomic_t zone_tokens;
 };
 
+struct strzone_req {
+	struct list_head list;
+	struct bio *bio;
+};
+
 struct strzone_target {
         struct dm_dev *dev;
         sector_t start;
@@ -67,6 +75,8 @@ struct strzone_target {
 	struct bio_set bio_set;
 
 	struct strzone_metadata *metadata;
+	struct work_struct io_work;
+	struct list_head bio_list;
 };
 
 struct strzone_io {
@@ -590,14 +600,50 @@ static void strzone_remap(struct strzone_io *io)
 
 static int strzone_submit(struct strzone_target *szt, struct bio *bio)
 {
-	struct strzone_io *io = strzone_alloc_io(szt, bio);
+	struct strzone_req *req = kmalloc(sizeof(struct strzone_req),
+			GFP_KERNEL);
 
-	if (io) {
-		strzone_remap(io);
-		return strzone_submit_bios(io);
-	}
+	if (!req)
+		return -ENOMEM;
 
-	return DM_MAPIO_KILL;
+	req->bio = bio;
+	list_add_tail(&req->list, &szt->bio_list);
+
+	queue_work(strzone_wq, &szt->io_work);
+	
+	return DM_MAPIO_SUBMITTED;
+}
+
+static inline struct strzone_req *strzone_get_req(struct strzone_target *szt)
+{
+	struct strzone_req *req;
+
+	req = list_first_entry_or_null(&szt->bio_list, struct strzone_req,
+			list);
+	if (req)
+		list_del_init(&req->list);
+
+	return req;
+}
+
+static void strzone_work(struct work_struct *work)
+{
+	struct strzone_target *szt =
+		container_of(work, struct strzone_target, io_work);
+	struct strzone_io *io;
+	struct strzone_req *req;
+	struct bio *bio;
+
+	if (!(req = strzone_get_req(szt)))
+		return;
+
+	bio = req->bio;
+
+	if (!(io = strzone_alloc_io(szt, bio)))
+		return;
+
+	strzone_remap(io);
+	strzone_submit_bios(io);
 }
 
 static int strzone_map(struct dm_target *ti, struct bio *bio)
@@ -732,7 +778,8 @@ static int strzone_ctr(struct dm_target *ti, unsigned int argc,
 		goto out;
 	}
 	szt->zone_size_shift = ilog2(szt->zone_size);
-
+	INIT_WORK(&szt->io_work, strzone_work);
+	INIT_LIST_HEAD(&szt->bio_list);
 
 	/*
 	 * zone capacity will be filled up in a report-zone stage.
@@ -787,6 +834,11 @@ static struct target_type strzone = {
 
 int __init dm_strzone_init(void)
 {
+	strzone_wq = alloc_workqueue("strzone_wq",
+			WQ_MEM_RECLAIM | WQ_HIGHPRI, 0);
+	if (!strzone_wq)
+		return -ENOMEM;
+
         dm_register_target(&strzone);
 
         return 0;
@@ -795,6 +847,8 @@ int __init dm_strzone_init(void)
 void __exit dm_strzone_exit(void)
 {
         dm_unregister_target(&strzone);
+
+	destroy_workqueue(strzone_wq);
 }
 
 module_init(dm_strzone_init);
