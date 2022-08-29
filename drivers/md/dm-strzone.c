@@ -195,9 +195,6 @@ static bool strzone_lmap_insert(struct strzone_metadata *meta,
 	rb_link_node(&lmap->node, parent, new);
 	rb_insert_color(&lmap->node, root);
 
-	trace_printk("insert: lmap->slba=%lld, lmap->nlb=%d\n",
-			lmap->slba, lmap->nlb);
-
 	return true;
 }
 
@@ -550,9 +547,10 @@ retry:
 
 	nr_valid_chunks = atomic_inc_return(&zone->nr_valid_chunks);
 
-	trace_printk("lmap->slba=%lld, lmap->nlb=%u, pmap[%d/%d]: zone %u, nr_valid_chunks=%d\n",
+	trace_printk("mapping: insert: \tlmap->slba=%lld, lmap->nlb=%u, pmap[%d/%d]: zone %u, slba=%lld, nlb=%u, nr_valid_chunks=%d\n",
 			io->lmap->slba, io->lmap->nlb, index,
 			io->lmap->nr_pmaps - 1, zone->id,
+			io->lmap->pmap[index].slba, io->lmap->pmap[index].nlb,
 			nr_valid_chunks);
 }
 
@@ -656,7 +654,11 @@ static void __strzone_alloc_io_read(struct strzone_io *io,
 
 		strzone_submit_bio_remap(clone);
 
-		remaining -= to_sector(clone->bi_iter.bi_size);
+		if (remaining >= to_sector(clone->bi_iter.bi_size))
+			remaining -= to_sector(clone->bi_iter.bi_size);
+		else
+			remaining = 0;
+
 		if (remaining)
 			bio_advance(orig_bio, clone->bi_iter.bi_size);
 
@@ -728,24 +730,39 @@ static int strzone_get_extents(struct strzone_target *szt, u64 slba, u32 nlb,
 	strzone_extent *extent;
 	unsigned long idx;
 	struct strzone_pmap *pmap;
+	u32 total_nlb = 0;
+
+	trace_printk("mapping: read: slba=%lld, nlb=%u\n", slba, nlb);
 
 	while (remaining) {
 		int chunk_idx;
 		int chunk_blocks;
 
 		lmap = strzone_lmap_search(&szt->metadata->lmap_root, lba);
-		if (!lmap)
-			goto nomap;
+		if (!lmap) {
+			if (!nr_extents)
+				goto nomap;
+			return nr_extents;
+		}
 
 		chunk_idx = (lba - lmap->slba) / szt->chunk_size_blocks;
 		chunk_blocks = (lba - lmap->slba) % szt->chunk_size_blocks;
+
+		BUG_ON(chunk_idx >= lmap->nr_pmaps);
 
 		pmap = &lmap->pmap[chunk_idx++];
 		extent = kmalloc(sizeof(strzone_extent), GFP_KERNEL);
 		extent->slba = pmap->slba + chunk_blocks;
 		extent->nlb = (remaining > pmap->nlb - chunk_blocks) ?
 			pmap->nlb - chunk_blocks : remaining;
-		remaining -= extent->nlb;
+		total_nlb += extent->nlb;
+
+		trace_printk("mapping: read: \tslba=%lld, nlb=%u\n",
+				extent->slba, extent->nlb);
+
+		remaining -= (remaining >= extent->nlb) ?
+			extent->nlb : remaining;
+
 		lba += extent->nlb;
 		if (xa_insert(extents, nr_extents++, extent, GFP_KERNEL))
 			goto nomap;
@@ -754,8 +771,10 @@ static int strzone_get_extents(struct strzone_target *szt, u64 slba, u32 nlb,
 			extent = kmalloc(sizeof(strzone_extent), GFP_KERNEL);
 			extent->slba = lmap->pmap[chunk_idx].slba;
 			extent->nlb = (remaining > lmap->pmap[chunk_idx].nlb) ?
-				pmap->nlb : remaining;
-			remaining -= extent->nlb;
+				lmap->pmap[chunk_idx].nlb : remaining;
+			total_nlb += extent->nlb;
+			remaining -= (remaining >= extent->nlb) ?
+				extent->nlb : remaining;
 			lba += extent->nlb;
 			if (xa_insert(extents, nr_extents++, extent, GFP_KERNEL))
 				goto nomap;
@@ -764,7 +783,9 @@ static int strzone_get_extents(struct strzone_target *szt, u64 slba, u32 nlb,
 		}
 	}
 
+	trace_printk("mapping: nlb=%u, total_nlb=%u\n", nlb, total_nlb);
 	return nr_extents;
+
 nomap:
 	xa_for_each(extents, idx, extent)
 		kfree(extent);
