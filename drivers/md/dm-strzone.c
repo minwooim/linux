@@ -12,7 +12,7 @@
 static unsigned int chunk_size = 128 * KB;
 module_param(chunk_size, uint, 0644);
 
-static int max_open_zones = 384;
+static int max_open_zones = 3000;
 module_param(max_open_zones, int, 0644);
 
 static void strzone_work(struct work_struct *work);
@@ -26,9 +26,11 @@ enum {
 static int mode;
 module_param(mode, int, 0644);
 
+struct strzone_zone;
 struct strzone_pmap {
 	u64 slba;
 	u32 nlb;
+	struct strzone_zone *zone;
 };
 
 typedef struct strzone_pmap strzone_extent;
@@ -109,6 +111,9 @@ struct strzone_zone {
 	unsigned int id;
 	u64 slba;
 	u64 wp;
+
+	bool finished;
+	atomic_t nr_valid_chunks;
 };
 
 struct strzone_zone_mgmt {
@@ -126,6 +131,8 @@ static inline const char *bio_op_name(struct bio *bio)
 		return "WRITE";
 	case REQ_OP_ZONE_APPEND:
 		return "ZONE APPEND";
+	case REQ_OP_ZONE_RESET:
+		return "ZONE RESET";
 	default:
 		return "UNKNOWN";
 	}
@@ -216,6 +223,63 @@ struct strzone_lmap *strzone_lmap_search(struct rb_root *root, u64 slba)
       return NULL;
 }
 
+static void strzone_submit_zone_mgmt(struct strzone_zone *zone, enum req_op op);
+static void strzone_try_reclaim_zone(struct strzone_zone *zone)
+{
+	if (atomic_dec_and_test(&zone->nr_valid_chunks) && zone->finished)
+		strzone_submit_zone_mgmt(zone, REQ_OP_ZONE_RESET);
+}
+
+/*
+ * It removes logical mapping for the given SLBA of a zone.  It's usually used
+ * for ZONE RESET operation.
+ */
+static void strzone_lmap_remove_zone(struct strzone_target *szt, u64 slba)
+{
+	u32 nlb = sector_to_lba(szt, szt->zone_capacity);
+	struct rb_root *root = &szt->metadata->lmap_root;
+	struct rb_node *node;
+	struct strzone_lmap *lmap;
+	struct xarray extents;
+	unsigned long idx;
+
+	xa_init(&extents);
+
+	trace_printk("lmap_remove: slba=%lld\n", slba);
+
+	/*
+	 * First, we need to find out the first rb-node containing the slba.
+	 */
+	lmap = strzone_lmap_search(root, slba);
+	if (!lmap)
+		return;
+
+	for (node = &lmap->node, idx = 0; node; node = rb_next(node), idx++) {
+		lmap = container_of(node, struct strzone_lmap, node);
+		if (lmap->slba >= slba + nlb)
+			break;
+
+		if (xa_insert(&extents, idx, lmap, GFP_KERNEL))
+			goto err;
+	}
+
+	xa_for_each(&extents, idx, lmap) {
+		int i;
+
+		trace_printk("lmap_remove: lmap->slba=%lld, lmap->nlb=%u\n",
+				lmap->slba, lmap->nlb);
+		for (i = 0; i < lmap->nr_pmaps; i++)
+			strzone_try_reclaim_zone(lmap->pmap[i].zone);
+
+		kfree(lmap->pmap);
+		rb_erase(&lmap->node, root);
+		kfree(lmap);
+	}
+
+err:
+	xa_destroy(&extents);
+}
+
 static struct strzone_zone *__strzone_alloc_free_zone(struct strzone_metadata *meta)
 {
 	struct strzone_zone *zone;
@@ -279,6 +343,34 @@ static void strzone_finish_zone(struct strzone_zone *zone)
 			lba_to_sector(szt, zone->slba), zone_size, GFP_NOFS);
 	if (err)
 		pr_err("failed to finish zone %u\n", zone->id);
+
+	zone->finished = true;
+}
+
+static void strzone_reset_zone(struct strzone_zone *zone)
+{
+	
+	struct strzone_target *szt = zone->szt;
+	struct block_device *bdev = szt->dev->bdev;
+	sector_t zone_size = szt->zone_size;
+	int err;
+
+	BUG_ON(atomic_read(&zone->nr_valid_chunks));
+
+	err = blkdev_zone_mgmt(bdev, REQ_OP_ZONE_RESET,
+			lba_to_sector(szt, zone->slba), zone_size, GFP_KERNEL);
+	if (err)
+		pr_err("failed to reset zone %u\n", zone->id);
+
+	zone->wp = zone->slba;
+	zone->finished = false;
+
+	/*
+	 * XXX: pull out of full_list and push it to the free_list.
+	 */
+
+	trace_printk("zone_reset: zone(%u), slba=%lld\n",
+			zone->id, zone->slba);
 }
 
 static inline struct strzone_zone_mgmt *strzone_get_zone_mgmt(
@@ -306,6 +398,9 @@ static void strzone_zone_work(struct work_struct *work)
 		switch (zone_mgmt->op) {
 		case REQ_OP_ZONE_FINISH:
 			strzone_finish_zone(zone_mgmt->zone);
+			break;
+		case REQ_OP_ZONE_RESET:
+			strzone_reset_zone(zone_mgmt->zone);
 			break;
 		default:
 			break;
@@ -440,6 +535,7 @@ static void strzone_remap_write(struct strzone_io *io, int index,
 {
 	struct strzone_target *szt = io->szt;
 	struct strzone_zone *zone;
+	int nr_valid_chunks;
 
 retry:
 	zone = strzone_alloc_zone(szt->metadata);
@@ -450,6 +546,14 @@ retry:
 	clone->bi_private = zone;
 	io->lmap->pmap[index].slba = zone->wp;
 	io->lmap->pmap[index].nlb = sector_to_nlb(szt, bio_sectors(clone));
+	io->lmap->pmap[index].zone = zone;
+
+	nr_valid_chunks = atomic_inc_return(&zone->nr_valid_chunks);
+
+	trace_printk("lmap->slba=%lld, lmap->nlb=%u, pmap[%d/%d]: zone %u, nr_valid_chunks=%d\n",
+			io->lmap->slba, io->lmap->nlb, index,
+			io->lmap->nr_pmaps - 1, zone->id,
+			nr_valid_chunks);
 }
 
 static int __strzone_alloc_io_write(struct bio *bio, struct strzone_io *io)
@@ -575,6 +679,7 @@ static struct strzone_io *strzone_alloc_io(struct strzone_target *szt,
 		err = __strzone_alloc_io_write(bio, io);
 
 	if (err) {
+		pr_err("dm-strzone: failed to alloc io, err=%d\n", err);
 		kfree(io);
 		return NULL;
 	}
@@ -585,6 +690,11 @@ static struct strzone_io *strzone_alloc_io(struct strzone_target *szt,
 static void strzone_submit_bios(struct strzone_io *io)
 {
 	struct strzone_target *szt = io->szt;
+
+	if (bio_op(io->orig_bio) == REQ_OP_ZONE_RESET) {
+		bio_endio(io->orig_bio);
+		return;
+	}
 
 	/*
 	 * `stripe_count == 0` means no mapping found.  system-udevd reads at
@@ -683,10 +793,20 @@ static void strzone_remap_read(struct strzone_io *io)
 	xa_destroy(&extents);
 }
 
+static void strzone_remap_zone_reset(struct strzone_io *io)
+{
+	struct strzone_target *szt = io->szt;
+	u64 slba = sector_to_lba(szt, io->orig_bio->bi_iter.bi_sector);
+
+	strzone_lmap_remove_zone(szt, slba);
+}
+
 static void strzone_remap(struct strzone_io *io)
 {
 	if (bio_op(io->orig_bio) == REQ_OP_READ)
 		strzone_remap_read(io);
+	else if (bio_op(io->orig_bio) == REQ_OP_ZONE_RESET)
+		strzone_remap_zone_reset(io);
 }
 
 static int strzone_submit(struct strzone_target *szt, struct bio *bio)
@@ -694,8 +814,10 @@ static int strzone_submit(struct strzone_target *szt, struct bio *bio)
 	struct strzone_req *req = kmalloc(sizeof(struct strzone_req),
 			GFP_KERNEL);
 
-	if (!req)
+	if (!req) {
+		pr_err("dm-strzone: failed to allocate strzone_req\n");
 		return -ENOMEM;
+	}
 
 	req->bio = bio;
 
@@ -795,12 +917,16 @@ static int strzone_init_zone(struct blk_zone *blkz, unsigned int num,
 		return -EBUSY;
 	}
 
+	zone->szt = szt;
 	zone->id = num;
 	zone->slba = (blkz->start << SECTOR_SHIFT) >>
 		ilog2(szt->logical_block_size);
 	zone->wp = (blkz->wp<< SECTOR_SHIFT) >> ilog2(szt->logical_block_size);
-	zone->szt = szt;
+	zone->finished = false;
+	atomic_set(&zone->nr_valid_chunks, 0);
+
 	szt->nr_zones++;
+
 
 	list_add_tail(&zone->list, &meta->free_zones_list);
 
