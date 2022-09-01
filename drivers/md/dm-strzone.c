@@ -5,15 +5,22 @@
 #include <linux/device-mapper.h>
 
 #define KB	(1024)
+#define MB	(KB * 1024)
+
+#define CHUNK_SIZE	(128 * KB)
+#define MAX_OPEN_ZONES	(256)
 
 /*
  * Must be power-of-2 and larger than 4KB.
  */
-static unsigned int chunk_size = 128 * KB;
+static unsigned int chunk_size = CHUNK_SIZE;
 module_param(chunk_size, uint, 0644);
 
-static int max_open_zones = 3000;
+static int max_open_zones = MAX_OPEN_ZONES;
 module_param(max_open_zones, int, 0644);
+
+static unsigned int max_io_size = MAX_OPEN_ZONES * CHUNK_SIZE;
+module_param(max_io_size, int, 0644);
 
 static void strzone_work(struct work_struct *work);
 static struct workqueue_struct *strzone_wq;
@@ -48,8 +55,11 @@ struct strzone_metadata {
 	struct xarray zones;
 
 	struct list_head free_zones_list;
+	spinlock_t free_zones_lock;
 	struct list_head partial_zones_list;
+	spinlock_t partial_zones_lock;
 	struct list_head full_zones_list;
+	spinlock_t full_zones_lock;
 
 	struct rb_root lmap_root;
 	atomic_t zone_tokens;
@@ -280,16 +290,20 @@ err:
 static struct strzone_zone *__strzone_alloc_free_zone(struct strzone_metadata *meta)
 {
 	struct strzone_zone *zone;
+	int zone_tokens;
 
-	if (atomic_dec_if_positive(&meta->zone_tokens) < 0)
+	if ((zone_tokens = atomic_dec_if_positive(&meta->zone_tokens)) < 0)
 		return NULL;
 
+	spin_lock_irq(&meta->free_zones_lock);
 	zone = list_first_entry_or_null(&meta->free_zones_list,
 			struct strzone_zone, list);
 	if (zone) {
 		list_del_init(&zone->list);
-		trace_printk("free zone allocated %u\n", zone->id);
+		trace_printk("zone: free zone allocated (zone %u, zone_tokens=%d)\n",
+				zone->id, zone_tokens);
 	}
+	spin_unlock_irq(&meta->free_zones_lock);
 
 	return zone;
 }
@@ -298,12 +312,15 @@ static struct strzone_zone *__strzone_alloc_partial_zone(struct strzone_metadata
 {
 	struct strzone_zone *zone;
 
+	spin_lock_irq(&meta->partial_zones_lock);
 	zone = list_first_entry_or_null(&meta->partial_zones_list,
 			struct strzone_zone, list);
 	if (zone) {
 		list_del_init(&zone->list);
-		trace_printk("parital zone allocated %u\n", zone->id);
+		trace_printk("zone: parital zone allocated (zone %u)\n",
+				zone->id);
 	}
+	spin_unlock_irq(&meta->partial_zones_lock);
 
 	return zone;
 }
@@ -434,12 +451,19 @@ static void strzone_done_zone(struct strzone_zone *zone, u32 nlb)
 
 	remaining = zone_remaining_sectors(zone);
         if (remaining < to_sector(chunk_size)) {
+		spin_lock_irq(&meta->full_zones_lock);
 		list_add_tail(&zone->list, &meta->full_zones_list);
+		spin_unlock_irq(&meta->full_zones_lock);
 		atomic_inc(&meta->zone_tokens);
 		if (remaining)
 			strzone_submit_zone_mgmt(zone, REQ_OP_ZONE_FINISH);
-	} else
+	} else {
+		spin_lock_irq(&meta->partial_zones_lock);
 		list_add_tail(&zone->list, &meta->partial_zones_list);
+		trace_printk("zone: add to partial zone list (zone %u)\n",
+				zone->id);
+		spin_unlock_irq(&meta->partial_zones_lock);
+	}
 }
 
 static inline struct strzone_tio *clone_to_tio(struct bio *clone)
@@ -481,9 +505,9 @@ static void strzone_clone_endio(struct bio *bio)
 			bio->bi_iter.bi_size,
 			sector_to_lba(szt, to_sector(bio->bi_iter.bi_size)));
 
+	bio_put(bio);
 	if (zone && bio->bi_status == BLK_STS_OK)
 		strzone_done_zone(zone, sector_to_nlb(szt, bio_sectors(bio)));
-	bio_put(bio);
 	strzone_dec_pending(io);
 }
 
@@ -832,6 +856,7 @@ static void strzone_remap(struct strzone_io *io)
 
 static int strzone_submit(struct strzone_target *szt, struct bio *bio)
 {
+/*
 	struct strzone_req *req = kmalloc(sizeof(struct strzone_req),
 			GFP_KERNEL);
 
@@ -847,6 +872,15 @@ static int strzone_submit(struct strzone_target *szt, struct bio *bio)
 	spin_unlock(&szt->bio_lock);
 
 	queue_work(strzone_wq, &szt->io_work);
+*/
+
+	struct strzone_io *io;
+
+	if (!(io = strzone_alloc_io(szt, bio)))
+		return DM_MAPIO_DELAY_REQUEUE;
+
+	strzone_remap(io);
+	strzone_submit_bios(io);
 	
 	return DM_MAPIO_SUBMITTED;
 }
@@ -876,8 +910,10 @@ static void strzone_work(struct work_struct *work)
 	while ((req = strzone_get_req(szt))) {
 		bio = req->bio;
 
-		if (!(io = strzone_alloc_io(szt, bio)))
-			return;
+		if (!(io = strzone_alloc_io(szt, bio))) {
+			kfree(req);
+			continue;
+		}
 
 		strzone_remap(io);
 		strzone_submit_bios(io);
@@ -980,8 +1016,11 @@ static int strzone_init_metadata(struct strzone_target *szt)
 	szt->metadata = meta;
 
 	INIT_LIST_HEAD(&meta->free_zones_list);
+	spin_lock_init(&meta->free_zones_lock);
 	INIT_LIST_HEAD(&meta->partial_zones_list);
+	spin_lock_init(&meta->partial_zones_lock);
 	INIT_LIST_HEAD(&meta->full_zones_list);
+	spin_lock_init(&meta->full_zones_lock);
 
 	ret = blkdev_report_zones(szt->dev->bdev, 0, BLK_ALL_ZONES,
 			strzone_init_zone, szt);
@@ -1041,6 +1080,9 @@ static int strzone_ctr(struct dm_target *ti, unsigned int argc,
 
 	strzone_init_metadata(szt);
 
+	if (dm_set_target_max_io_len(ti, max_io_size))
+		goto out;
+
 	trace_printk("chunk_size=%u bytes, zone_size=%lld bytes, zone_capacity=%lld bytes\n",
 			chunk_size,
 			szt->zone_size << SECTOR_SHIFT,
@@ -1068,6 +1110,14 @@ static int strzone_iterate_devices(struct dm_target *ti,
 	return fn(ti, szt->dev, szt->start, ti->len, data);
 }
 
+static void strzone_io_hints(struct dm_target *ti, struct queue_limits *limits)
+{
+	/*
+	blk_limits_io_min(limits, max_io_size);
+	blk_limits_io_opt(limits, max_io_size);
+	*/
+}
+
 static struct target_type strzone = {
         .name = "strzone",
         .version = {1, 0, 0},
@@ -1078,6 +1128,7 @@ static struct target_type strzone = {
 	.features = DM_TARGET_ZONED_HM,
 	.report_zones = strzone_report_zones,
 	.iterate_devices = strzone_iterate_devices,
+	.io_hints = strzone_io_hints,
 };
 
 int __init dm_strzone_init(void)
