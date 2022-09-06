@@ -267,27 +267,11 @@ static int f_getowner_uids(struct file *filp, unsigned long arg)
 }
 #endif
 
-static bool rw_hint_valid(enum rw_hint hint)
-{
-	switch (hint) {
-	case RWH_WRITE_LIFE_NOT_SET:
-	case RWH_WRITE_LIFE_NONE:
-	case RWH_WRITE_LIFE_SHORT:
-	case RWH_WRITE_LIFE_MEDIUM:
-	case RWH_WRITE_LIFE_LONG:
-	case RWH_WRITE_LIFE_EXTREME:
-		return true;
-	default:
-		return false;
-	}
-}
-
 static long fcntl_rw_hint(struct file *file, unsigned int cmd,
 			  unsigned long arg)
 {
 	struct inode *inode = file_inode(file);
 	u64 __user *argp = (u64 __user *)arg;
-	enum rw_hint hint;
 	u64 h;
 
 	switch (cmd) {
@@ -299,12 +283,8 @@ static long fcntl_rw_hint(struct file *file, unsigned int cmd,
 	case F_SET_RW_HINT:
 		if (copy_from_user(&h, argp, sizeof(h)))
 			return -EFAULT;
-		hint = (enum rw_hint) h;
-		if (!rw_hint_valid(hint))
-			return -EINVAL;
-
 		inode_lock(inode);
-		inode->i_write_hint = hint;
+		inode->i_write_hint = (u8) h;
 		inode_unlock(inode);
 		return 0;
 	default:

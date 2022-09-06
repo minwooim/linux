@@ -53,7 +53,7 @@
 
 static int fsync_buffers_list(spinlock_t *lock, struct list_head *list);
 static int submit_bh_wbc(blk_opf_t opf, struct buffer_head *bh,
-			 struct writeback_control *wbc);
+		struct inode *inode, struct writeback_control *wbc);
 
 #define BH_ENTRY(list) list_entry((list), struct buffer_head, b_assoc_buffers)
 
@@ -1804,7 +1804,8 @@ int __block_write_full_page(struct inode *inode, struct page *page,
 	do {
 		struct buffer_head *next = bh->b_this_page;
 		if (buffer_async_write(bh)) {
-			submit_bh_wbc(REQ_OP_WRITE | write_flags, bh, wbc);
+			submit_bh_wbc(REQ_OP_WRITE | write_flags, bh,
+					inode, wbc);
 			nr_underway++;
 		}
 		bh = next;
@@ -1858,7 +1859,8 @@ recover:
 		struct buffer_head *next = bh->b_this_page;
 		if (buffer_async_write(bh)) {
 			clear_buffer_dirty(bh);
-			submit_bh_wbc(REQ_OP_WRITE | write_flags, bh, wbc);
+			submit_bh_wbc(REQ_OP_WRITE | write_flags, bh,
+					inode, wbc);
 			nr_underway++;
 		}
 		bh = next;
@@ -2674,7 +2676,7 @@ static void end_bio_bh_io_sync(struct bio *bio)
 }
 
 static int submit_bh_wbc(blk_opf_t opf, struct buffer_head *bh,
-			 struct writeback_control *wbc)
+			struct inode *inode, struct writeback_control *wbc)
 {
 	const enum req_op op = opf & REQ_OP_MASK;
 	struct bio *bio;
@@ -2701,6 +2703,10 @@ static int submit_bh_wbc(blk_opf_t opf, struct buffer_head *bh,
 	fscrypt_set_bio_crypt_ctx_bh(bio, bh, GFP_NOIO);
 
 	bio->bi_iter.bi_sector = bh->b_blocknr * (bh->b_size >> 9);
+	if (inode) {
+		bio->bi_write_hint = inode->i_write_hint;
+		bio->bi_ino = inode->i_ino;
+	}
 
 	bio_add_page(bio, bh->b_page, bh->b_size, bh_offset(bh));
 	BUG_ON(bio->bi_iter.bi_size != bh->b_size);
@@ -2722,7 +2728,7 @@ static int submit_bh_wbc(blk_opf_t opf, struct buffer_head *bh,
 
 int submit_bh(blk_opf_t opf, struct buffer_head *bh)
 {
-	return submit_bh_wbc(opf, bh, NULL);
+	return submit_bh_wbc(opf, bh, NULL, NULL);
 }
 EXPORT_SYMBOL(submit_bh);
 

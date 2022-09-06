@@ -926,8 +926,8 @@ static int strzone_map(struct dm_target *ti, struct bio *bio)
 {
         struct strzone_target *szt = (struct strzone_target *) ti->private;
 
-	trace_printk("submit_bio(%p): op=%s, bi_sector=%lld(LBA %lld), bi_size=%d bytes(NLB %lld)\n",
-			bio, bio_op_name(bio),
+	trace_printk("submit_bio(%p): op=%s, ino=%u, write_hint=%d, bi_sector=%lld(LBA %lld), bi_size=%d bytes(NLB %lld)\n",
+			bio, bio_op_name(bio), bio->bi_ino, bio->bi_write_hint,
 			bio->bi_iter.bi_sector,
 			sector_to_lba(szt, bio->bi_iter.bi_sector),
 			bio->bi_iter.bi_size,

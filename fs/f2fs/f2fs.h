@@ -1183,6 +1183,7 @@ enum iostat_type {
 struct f2fs_io_info {
 	struct f2fs_sb_info *sbi;	/* f2fs_sb_info pointer */
 	nid_t ino;		/* inode number */
+	u8 write_hint;		/* inode write hint */
 	enum page_type type;	/* contains DATA/NODE/META/META_FLUSH */
 	enum temp_type temp;	/* contains HOT/WARM/COLD */
 	enum req_op op;		/* contains REQ_OP_ */

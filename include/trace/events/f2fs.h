@@ -1095,7 +1095,10 @@ DECLARE_EVENT_CLASS(f2fs__bio,
 		__field(enum req_op,	op)
 		__field(blk_opf_t,	op_flags)
 		__field(int,	type)
+		__field(unsigned int,	ino)
 		__field(sector_t,	sector)
+		__field(unsigned int,	zone)
+		__field(char *,	zone_type)
 		__field(unsigned int,	size)
 	),
 
@@ -1105,16 +1108,21 @@ DECLARE_EVENT_CLASS(f2fs__bio,
 		__entry->op		= bio_op(bio);
 		__entry->op_flags	= bio->bi_opf;
 		__entry->type		= type;
+		__entry->ino		= bio->bi_ino;
 		__entry->sector		= bio->bi_iter.bi_sector;
+		__entry->zone		= bio->bi_iter.bi_sector / 0x40000;
+		__entry->zone_type	= (__entry->zone < 16) ? "CONV" : "SEQ";
 		__entry->size		= bio->bi_iter.bi_size;
 	),
 
-	TP_printk("dev = (%d,%d)/(%d,%d), rw = %s(%s), %s, sector = %lld, size = %u",
+	TP_printk("dev = (%d,%d)/(%d,%d), rw = %s(%s), %s, ino = %d, sector = %lld (%s zone %d), size = %u",
 		show_dev(__entry->target),
 		show_dev(__entry->dev),
 		show_bio_type(__entry->op, __entry->op_flags),
 		show_block_type(__entry->type),
+		__entry->ino,
 		(unsigned long long)__entry->sector,
+		__entry->zone_type, __entry->zone,
 		__entry->size)
 );
 

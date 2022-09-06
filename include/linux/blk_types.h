@@ -257,6 +257,9 @@ struct bio {
 						 */
 	unsigned short		bi_flags;	/* BIO_* below */
 	unsigned short		bi_ioprio;
+#define BLK_NO_INODE		-1ULL
+	unsigned int		bi_ino;		/* inode number */
+	unsigned short		bi_write_hint;
 	blk_status_t		bi_status;
 	atomic_t		__bi_remaining;
 

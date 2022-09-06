@@ -436,6 +436,8 @@ static struct bio *__bio_alloc(struct f2fs_io_info *fio, int npages)
 	} else {
 		bio->bi_end_io = f2fs_write_end_io;
 		bio->bi_private = sbi;
+		bio->bi_ino = fio->ino;
+		bio->bi_write_hint = fio->write_hint;
 	}
 	iostat_alloc_and_bind_ctx(sbi, bio, NULL);
 
@@ -2720,6 +2722,7 @@ int f2fs_write_single_data_page(struct page *page, int *submitted,
 	struct f2fs_io_info fio = {
 		.sbi = sbi,
 		.ino = inode->i_ino,
+		.write_hint = inode->i_write_hint,
 		.type = DATA,
 		.op = REQ_OP_WRITE,
 		.op_flags = wbc_to_write_flags(wbc),
