@@ -8,6 +8,7 @@
 #define MB	(KB * 1024)
 
 #define CHUNK_SIZE	(128 * KB)
+#define STRIPE_COUNT	(8)
 #define MAX_OPEN_ZONES	(256)
 
 /*
@@ -18,9 +19,6 @@ module_param(chunk_size, uint, 0644);
 
 static int max_open_zones = MAX_OPEN_ZONES;
 module_param(max_open_zones, int, 0644);
-
-static unsigned int max_io_size = MAX_OPEN_ZONES * CHUNK_SIZE;
-module_param(max_io_size, int, 0644);
 
 static void strzone_work(struct work_struct *work);
 static struct workqueue_struct *strzone_wq;
@@ -1080,7 +1078,8 @@ static int strzone_ctr(struct dm_target *ti, unsigned int argc,
 
 	strzone_init_metadata(szt);
 
-	if (dm_set_target_max_io_len(ti, max_io_size))
+	if (dm_set_target_max_io_len(ti,
+				(CHUNK_SIZE * STRIPE_COUNT) >> SECTOR_SHIFT))
 		goto out;
 
 	trace_printk("chunk_size=%u bytes, zone_size=%lld bytes, zone_capacity=%lld bytes\n",
