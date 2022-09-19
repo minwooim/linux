@@ -11,6 +11,8 @@
 #define STRIPE_COUNT	(8)
 #define MAX_OPEN_ZONES	(256)
 
+#define MAX_OPEN_ZONES_INODE	(32)
+
 /*
  * Must be power-of-2 and larger than 4KB.
  */
@@ -73,9 +75,16 @@ struct strzone_metadata {
 	spinlock_t inodes_lock;
 };
 
+static inline struct strzone_inode *strzone_get_inode(
+		struct strzone_metadata *meta, unsigned ino)
+{
+	return xa_load(&meta->inodes, ino);
+}
+
 struct strzone_inode {
 	/* partially written zones */
 	struct list_head zones;
+	atomic_t nr_zones;
 	spinlock_t lock;
 };
 
@@ -154,6 +163,27 @@ struct strzone_zone_mgmt {
 	struct strzone_zone *zone;
 };
 
+static bool strzone_dump;
+static void strzone_dump_inodes(struct strzone_metadata *meta)
+{
+	struct strzone_inode *inode;
+	unsigned long idx;
+	struct list_head *item;
+
+	xa_for_each(&meta->inodes, idx, inode) {
+		pr_info("inode %lu\n", idx);
+		list_for_each(item, &inode->zones) {
+			struct strzone_zone *zone =
+				list_entry(item, struct strzone_zone, list);
+			pr_info("\tzone %u, slba 0x%llx, wp 0x%llx\n",
+					zone->id, zone->slba, zone->wp);
+		}
+	}
+
+	pr_info("\n");
+}
+
+static inline sector_t strzone_zone_start(struct strzone_zone *zone);
 static inline void strzone_inode_put_zone(struct strzone_inode *n,
 		struct strzone_zone *z)
 {
@@ -173,8 +203,9 @@ static struct strzone_zone *strzone_inode_get_zone(struct strzone_inode *n,
 	z = list_first_entry_or_null(&n->zones, struct strzone_zone, list);
 	if (z) {
 		list_del_init(&z->list);
-		trace_printk("zone-alloc: %sinode-zone allocated (zone %u, inode %u)\n",
-				inode ? "" : "non-", z->id, z->ino);
+		trace_printk("zone-alloc: %sinode-zone allocated (zone %u (start 0x%llx), inode %u)\n",
+				inode ? "" : "non-", z->id,
+				strzone_zone_start(z), z->ino);
 	}
 	spin_unlock_irq(&n->lock);
 
@@ -219,6 +250,11 @@ static inline u64 lba_to_sector(struct strzone_target *szt, u64 lba)
 static inline u64 sector_to_nlb(struct strzone_target *szt, sector_t sector)
 {
 	return DIV_ROUND_UP(sector << SECTOR_SHIFT, szt->logical_block_size);
+}
+
+static inline sector_t strzone_zone_start(struct strzone_zone *zone)
+{
+	return lba_to_sector(zone->szt, zone->slba);
 }
 
 static inline sector_t zone_remaining_sectors(struct strzone_zone *zone)
@@ -427,7 +463,13 @@ static struct strzone_zone *__strzone_alloc_zone_greedy(struct strzone_metadata 
 static struct strzone_zone *__strzone_alloc_zone_inode(
 		struct strzone_metadata *meta, unsigned int ino)
 {
+	struct strzone_inode *inode;
 	struct strzone_zone *zone;
+
+	if (strzone_dump) {
+		strzone_dump_inodes(meta);
+		strzone_dump = false;
+	}
 
 	if ((zone = __strzone_alloc_partial_zone_inode(meta, ino)))
 		return zone;
@@ -437,9 +479,23 @@ static struct strzone_zone *__strzone_alloc_zone_inode(
 	 * more zones in the device.  In that case, we just search partially
 	 * wrtitten zones regardless to the inode.
 	 */
+	inode = strzone_get_inode(meta, ino);
+	if (!inode)
+		goto free_zone;
+
+	if (atomic_read(&inode->nr_zones) < MAX_OPEN_ZONES_INODE) {
+		if ((zone = __strzone_alloc_free_zone(meta))) {
+			atomic_inc(&inode->nr_zones);
+			return zone;
+		}
+	}
+
+	goto no_inode;
+
+free_zone:
 	if ((zone = __strzone_alloc_free_zone(meta)))
 		return zone;
-
+no_inode:
 	return __strzone_alloc_partial_zone_no_inode(meta);
 }
 
@@ -451,6 +507,7 @@ static struct strzone_inode *__strzone_alloc_inode(void)
 	BUG_ON(!inode);
 
 	INIT_LIST_HEAD(&inode->zones);
+	atomic_set(&inode->nr_zones, 0);
 	spin_lock_init(&inode->lock);
 	return inode;
 }
@@ -624,8 +681,6 @@ static void __strzone_done_zone(struct strzone_zone *zone)
 	default:
 		BUG();
 	}
-
-	trace_printk("done_zone: zone %u, ino %u\n", zone->id, zone->ino);
 }
 
 static void __strzone_finish_zone(struct strzone_zone *zone)
@@ -639,11 +694,27 @@ static void __strzone_finish_zone(struct strzone_zone *zone)
 
 	if (!zone_is_full(zone))
 		strzone_submit_zone_mgmt(zone, REQ_OP_ZONE_FINISH);
+	else
+		trace_printk("failed to finish a zone because it's already full, zone %u\n",
+				zone->id);
+
+	if (mode == DM_STRZONE_INODE) {
+		struct strzone_inode *inode =
+			strzone_get_inode(meta, zone->ino);
+		atomic_dec(&inode->nr_zones);
+	}
 }
 
 static void strzone_done_zone(struct strzone_zone *zone, u32 nlb)
 {
 	zone->wp += nlb;
+
+	trace_printk("done_zone: zone %u (wp %llu -> %llu, +%llu remaining %llu%s), ino %u\n",
+			zone->id, zone->wp - nlb, zone->wp,
+			lba_to_sector(zone->szt, nlb),
+			zone_remaining_sectors(zone),
+			zone_remaining_sectors(zone) < to_sector(chunk_size) ?
+				" FINISH" : "", zone->ino);
 
         if (zone_remaining_sectors(zone) < to_sector(chunk_size))
 		__strzone_finish_zone(zone);
@@ -692,6 +763,9 @@ static void strzone_clone_endio(struct bio *bio)
 
 	if (zone && bio->bi_status == BLK_STS_OK)
 		strzone_done_zone(zone, sector_to_nlb(szt, bio_sectors(bio)));
+	else
+		trace_printk("clone_endio(%p): failed to call done_zone(), %d\n",
+				bio, bio->bi_status);
 	bio_put(bio);
 	strzone_dec_pending(io);
 }
@@ -1164,6 +1238,9 @@ static int strzone_init_zone(struct blk_zone *blkz, unsigned int num,
 	zone->wp = (blkz->wp<< SECTOR_SHIFT) >> ilog2(szt->logical_block_size);
 	zone->finished = false;
 	atomic_set(&zone->nr_valid_chunks, 0);
+
+	trace_printk("zone-init: zone %u, start=0x%llx, wp=0x%llx, type=%d\n",
+			zone->id, blkz->start, blkz->wp, blkz->type);
 
 	szt->nr_zones++;
 
