@@ -157,10 +157,11 @@ struct strzone_zone_mgmt {
 static inline void strzone_inode_put_zone(struct strzone_inode *n,
 		struct strzone_zone *z)
 {
-	spin_lock_irq(&n->lock);
+	spin_lock(&n->lock);
 	list_add_tail(&z->list, &n->zones);
-	spin_unlock_irq(&n->lock);
-	trace_printk("inode_put_zone: inode %u, put zone %u\n", z->ino, z->id);
+	spin_unlock(&n->lock);
+	trace_printk("zone-rel: inode-zone released (zone %u (start 0x%llx), ino %u)\n",
+			z->id, strzone_zone_start(z), z->ino);
 }
 
 static struct strzone_zone *strzone_inode_get_zone(struct strzone_inode *n,
@@ -631,9 +632,9 @@ static void __strzone_finish_zone(struct strzone_zone *zone)
 {
 	struct strzone_metadata *meta = zone->szt->metadata;
 
-	spin_lock_irq(&meta->full_zones_lock);
+	spin_lock(&meta->full_zones_lock);
 	list_add_tail(&zone->list, &meta->full_zones_list);
-	spin_unlock_irq(&meta->full_zones_lock);
+	spin_unlock(&meta->full_zones_lock);
 	atomic_inc(&meta->zone_tokens);
 
 	if (!zone_is_full(zone))
