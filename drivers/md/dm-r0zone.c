@@ -41,6 +41,7 @@ struct r0zone_target {
 	unsigned int nr_zones;
 
 	sector_t lzone_size;
+	sector_t lzone_capacity;
 
 	struct bio_set bio_set;
 
@@ -78,9 +79,9 @@ struct r0zone_zone {
 
 static inline sector_t l2p_sect(struct r0zone_target *target, sector_t sector)
 {
-	sector_t lstart = sector / target->lzone_size;
-	sector_t loffset = sector - lstart;
-	sector_t pstart = lstart * STRIPE_SIZE;
+	int lstart = sector / target->lzone_size;
+	sector_t loffset = sector - (lstart * target->lzone_size);
+	sector_t pstart = lstart * STRIPE_SIZE * target->zone_size;
 
 	/*
 	 * Example of chunk mapping for (STRIPE_SIZE = 4)
@@ -93,12 +94,20 @@ static inline sector_t l2p_sect(struct r0zone_target *target, sector_t sector)
 	 *    8     9     ...		row=2
 	 * col=0 col=1 col=2 col=3
 	 */
+	// chunk id 는 구해올 수 있지만, 128k 로 나눠떨어지지 않을 수 있음.
 	int chunk = loffset / target->chunk_size_sectors;
+	sector_t remain = loffset % target->chunk_size_sectors;
 	int row = chunk / STRIPE_SIZE;
-	int col = chunk & ~STRIPE_SIZE;
+	int col = chunk & (STRIPE_SIZE - 1);
+
+	pr_err("sector=%lld / lstart=%lld, loffset=%lld, pstart=%lld(%lld), "
+			"chunk=%d, remain=%lld, row=%d, col=%d\n",
+			sector, lstart, loffset, pstart, pstart / target->zone_size,
+			chunk,
+			remain, row, col);
 
 	return pstart + (col * target->zone_size) +
-		(row * target->chunk_size_sectors);
+		(row * target->chunk_size_sectors) + remain;
 }
 
 static inline sector_t p2l_sect(struct r0zone_target *target, sector_t sector)
@@ -162,13 +171,24 @@ static inline struct r0zone_tio *clone_to_tio(struct bio *clone)
 	return container_of(clone, struct r0zone_tio, clone);
 }
 
+static void r0zone_submit_bio(struct r0zone_target *szt, struct bio *bio)
+{
+	BUG_ON(bio_sectors(bio) > szt->chunk_size_sectors);
+
+	/*
+	 * Remap the split bio with the physical address
+	 */
+	bio->bi_iter.bi_sector = l2p_sect(szt, bio->bi_iter.bi_sector);
+	submit_bio_noacct(bio);
+}
+
 static void r0zone_split_bio(struct r0zone_target *szt, struct bio *bio,
 		sector_t size)
 {
 	struct bio *split = bio_split(bio, size, GFP_NOIO,
 			&szt->bio_set);
 	bio_chain(split, bio);
-	submit_bio_noacct(split);
+	r0zone_submit_bio(szt, split);
 }
 
 static int r0zone_read(struct r0zone_target *szt, struct bio *bio)
@@ -189,7 +209,8 @@ static int r0zone_read(struct r0zone_target *szt, struct bio *bio)
 	while (bio->bi_iter.bi_size > chunk_size)
 		r0zone_split_bio(szt, bio, szt->chunk_size_sectors);
 
-	submit_bio_noacct(bio);
+
+	r0zone_submit_bio(szt, bio);
 	return DM_MAPIO_SUBMITTED;
 }
 
@@ -241,6 +262,7 @@ static int r0zone_init_or_update_zone(struct blk_zone *blkz, unsigned int num,
 	zone->szt = szt;
 	zone->_start = blkz->start;
 	szt->zone_capacity = blkz->capacity;
+	szt->lzone_capacity = szt->zone_capacity * STRIPE_SIZE;
 
 update:
 	zone->wp = (blkz->wp<< SECTOR_SHIFT) >> ilog2(szt->logical_block_size);
@@ -372,6 +394,7 @@ static int r0zone_ctr(struct dm_target *ti, unsigned int argc,
 	 * zone capacity will be filled up in a report-zone stage.
 	 */
 	szt->zone_capacity = 0;
+	szt->lzone_capacity = 0;
 	front_pad = __alignof__(struct r0zone_tio) + DM_STRZONE_TIO_BIO_OFFSET;
 	if (bioset_init(&szt->bio_set, 8192, front_pad, 0))
 		goto out;
