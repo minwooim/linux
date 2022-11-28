@@ -100,11 +100,13 @@ static inline sector_t l2p_sect(struct r0zone_target *target, sector_t sector)
 	int row = chunk / STRIPE_SIZE;
 	int col = chunk & (STRIPE_SIZE - 1);
 
+	/*
 	pr_err("sector=%lld / lstart=%lld, loffset=%lld, pstart=%lld(%lld), "
 			"chunk=%d, remain=%lld, row=%d, col=%d\n",
 			sector, lstart, loffset, pstart, pstart / target->zone_size,
 			chunk,
 			remain, row, col);
+	*/
 
 	return pstart + (col * target->zone_size) +
 		(row * target->chunk_size_sectors) + remain;
