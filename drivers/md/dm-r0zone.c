@@ -162,13 +162,43 @@ static inline struct r0zone_tio *clone_to_tio(struct bio *clone)
 	return container_of(clone, struct r0zone_tio, clone);
 }
 
+static int r0zone_read(struct r0zone_target *szt, struct bio *bio)
+{
+	struct bio *split;
+
+	bio_set_dev(bio, szt->dev->bdev);
+
+	while (bio->bi_iter.bi_size > chunk_size) {
+		split = bio_split(bio, szt->chunk_size_sectors, GFP_NOIO,
+				&szt->bio_set);
+		bio_chain(split, bio);
+		submit_bio_noacct(split);
+	}
+
+	submit_bio_noacct(bio);
+	return DM_MAPIO_SUBMITTED;
+}
+
+static int r0zone_write(struct r0zone_target *szt, struct bio *bio)
+{
+	return -EINVAL;
+}
+
 static int r0zone_map(struct dm_target *ti, struct bio *bio)
 {
         struct r0zone_target *szt = (struct r0zone_target *) ti->private;
 
-	bio_set_dev(bio, szt->dev->bdev);
-	submit_bio(bio);
-	return DM_MAPIO_SUBMITTED;
+	switch (bio_op(bio)) {
+	case REQ_OP_READ:
+		return r0zone_read(szt, bio);
+		break;
+	case REQ_OP_WRITE:
+		return r0zone_write(szt, bio);
+		break;
+	default:
+		pr_err("invalid operation of bio\n");
+		return -EINVAL;
+	}
 }
 
 static int r0zone_init_or_update_zone(struct blk_zone *blkz, unsigned int num,
@@ -280,17 +310,19 @@ static int r0zone_init_metadata(struct r0zone_target *szt)
 	return 0;
 }
 
-static void r0zone_update_device_limits(struct r0zone_target *szt)
+static void r0zone_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
-	struct block_device *bdev = szt->dev->bdev;
-	struct request_queue *q = bdev_get_queue(bdev);
-	struct queue_limits *limits = &q->limits;
+	struct r0zone_target *szt = ti->private;
+	sector_t zone_sectors = bdev_zone_sectors(szt->dev->bdev);
 
 	/*
-	 * since we update queue limits here, it will be retrieved from
-	 * the iterate_device callback from md layer.
+	 * XXX: should update queue limits here, but number of zones are not
+	 * consistent over the lifetime....
 	 */
-	limits->chunk_sectors = szt->zone_size * STRIPE_SIZE;
+	/*
+	limits->chunk_sectors = zone_sectors * STRIPE_SIZE;
+	limits->max_sectors = zone_sectors * STRIPE_SIZE;
+	*/
 }
 
 static int r0zone_ctr(struct dm_target *ti, unsigned int argc,
@@ -334,8 +366,6 @@ static int r0zone_ctr(struct dm_target *ti, unsigned int argc,
 
 	r0zone_init_metadata(szt);
 
-	r0zone_update_device_limits(szt);
-
 	pr_info("dm-strzone: %s: chunk_size=%u bytes, zone_size=%lld bytes, zone_capacity=%lld bytes\n", szt->dev->name, chunk_size,
 			szt->zone_size << SECTOR_SHIFT,
 			szt->zone_capacity << SECTOR_SHIFT);
@@ -372,6 +402,7 @@ static struct target_type strzone = {
 	.features = DM_TARGET_ZONED_HM,
 	.report_zones = r0zone_report_zones,
 	.iterate_devices = r0zone_iterate_devices,
+	.io_hints = r0zone_io_hints,
 };
 
 int __init dm_r0zone_init(void)
