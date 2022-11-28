@@ -162,18 +162,32 @@ static inline struct r0zone_tio *clone_to_tio(struct bio *clone)
 	return container_of(clone, struct r0zone_tio, clone);
 }
 
+static void r0zone_split_bio(struct r0zone_target *szt, struct bio *bio,
+		sector_t size)
+{
+	struct bio *split = bio_split(bio, size, GFP_NOIO,
+			&szt->bio_set);
+	bio_chain(split, bio);
+	submit_bio_noacct(split);
+}
+
 static int r0zone_read(struct r0zone_target *szt, struct bio *bio)
 {
-	struct bio *split;
+	sector_t start = bio->bi_iter.bi_sector;
+	sector_t _start;
 
 	bio_set_dev(bio, szt->dev->bdev);
 
-	while (bio->bi_iter.bi_size > chunk_size) {
-		split = bio_split(bio, szt->chunk_size_sectors, GFP_NOIO,
-				&szt->bio_set);
-		bio_chain(split, bio);
-		submit_bio_noacct(split);
-	}
+	/*
+	 * Round down the very first bio aligned to the chunk size.
+	 */
+	_start = round_down(start << SECTOR_SHIFT, chunk_size) >>
+			SECTOR_SHIFT;
+	if (start != _start && start - _start < bio_sectors(bio))
+		r0zone_split_bio(szt, bio, start - _start);
+
+	while (bio->bi_iter.bi_size > chunk_size)
+		r0zone_split_bio(szt, bio, szt->chunk_size_sectors);
 
 	submit_bio_noacct(bio);
 	return DM_MAPIO_SUBMITTED;
