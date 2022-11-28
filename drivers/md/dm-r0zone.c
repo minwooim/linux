@@ -191,7 +191,7 @@ static void r0zone_split_bio(struct r0zone_target *szt, struct bio *bio,
 	r0zone_submit_bio(szt, split);
 }
 
-static int r0zone_read(struct r0zone_target *szt, struct bio *bio)
+static int r0zone_rw(struct r0zone_target *szt, struct bio *bio)
 {
 	sector_t start = bio->bi_iter.bi_sector;
 	sector_t _start;
@@ -214,22 +214,14 @@ static int r0zone_read(struct r0zone_target *szt, struct bio *bio)
 	return DM_MAPIO_SUBMITTED;
 }
 
-static int r0zone_write(struct r0zone_target *szt, struct bio *bio)
-{
-	return -EINVAL;
-}
-
 static int r0zone_map(struct dm_target *ti, struct bio *bio)
 {
         struct r0zone_target *szt = (struct r0zone_target *) ti->private;
 
 	switch (bio_op(bio)) {
 	case REQ_OP_READ:
-		return r0zone_read(szt, bio);
-		break;
 	case REQ_OP_WRITE:
-		return r0zone_write(szt, bio);
-		break;
+		return r0zone_rw(szt, bio);
 	default:
 		pr_err("invalid operation of bio\n");
 		return -EINVAL;
