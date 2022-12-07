@@ -274,6 +274,7 @@ static int r0zone_report_zones_cb(struct blk_zone *blkz, unsigned int num,
 	int i;
 	unsigned int last_physical_zone_id =
 		rounddown(szt->nr_physical_zones, STRIPE_SIZE) - 1;
+	unsigned zone_idx;
 
 	if (num > last_physical_zone_id) {
 		/*
@@ -310,6 +311,14 @@ static int r0zone_report_zones_cb(struct blk_zone *blkz, unsigned int num,
 	blkz->capacity = szt->zone_capacity * STRIPE_SIZE;
 	args->next_sector = blkz->start + blkz->len;
 
+	if (num == last_physical_zone_id) {
+		zone_idx = args->zone_idx;
+
+		args->zone_idx = szt->nr_physical_zones;
+		args->next_sector = get_capacity(szt->dev->bdev->bd_disk);
+
+		return args->orig_cb(blkz, zone_idx, args->orig_data);
+	}
 	return args->orig_cb(blkz, args->zone_idx++, args->orig_data);
 }
 
