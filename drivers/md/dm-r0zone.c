@@ -31,6 +31,7 @@ struct r0zone_target {
 	unsigned int logical_block_size;
 	unsigned int chunk_size_blocks;
 	sector_t chunk_size_sectors;
+	unsigned int nr_physical_zones;
 
 	/*
 	 * ZNS-specific parameters
@@ -271,6 +272,19 @@ static int r0zone_report_zones_cb(struct blk_zone *blkz, unsigned int num,
 	struct r0zone_target *szt = args->tgt->private;
 	struct r0zone_metadata *meta = szt->metadata;
 	int i;
+	unsigned int last_physical_zone_id =
+		rounddown(szt->nr_physical_zones, STRIPE_SIZE) - 1;
+
+	if (num > last_physical_zone_id) {
+		/*
+		 * To make caller give up iteration over the physcial zones.
+		 * e.g., dm_blk_do_report_zones() can give up the iteration
+		 *       when it reaches the last physical zones to be striped.
+		 */
+		args->zone_idx = szt->nr_physical_zones;
+		args->next_sector = get_capacity(szt->dev->bdev->bd_disk);
+		return 0;
+	}
 
 	/*
 	 * XXX: Should get entire lock to prevent zones from updating wp during
@@ -382,7 +396,7 @@ static int r0zone_ctr(struct dm_target *ti, unsigned int argc,
 	}
 	szt->lzone_size = szt->zone_size * STRIPE_SIZE;
 	szt->zone_size_shift = ilog2(szt->zone_size);
-
+	szt->nr_physical_zones = disk_nr_zones(szt->dev->bdev->bd_disk);
 
 	/*
 	 * zone capacity will be filled up in a report-zone stage.
