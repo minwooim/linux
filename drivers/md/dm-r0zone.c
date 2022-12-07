@@ -274,24 +274,16 @@ static int r0zone_report_zones_cb(struct blk_zone *blkz, unsigned int num,
 	int i;
 	unsigned int last_physical_zone_id =
 		rounddown(szt->nr_physical_zones, STRIPE_SIZE) - 1;
-	unsigned zone_idx;
-
-	if (num > last_physical_zone_id) {
-		/*
-		 * To make caller give up iteration over the physcial zones.
-		 * e.g., dm_blk_do_report_zones() can give up the iteration
-		 *       when it reaches the last physical zones to be striped.
-		 */
-		args->zone_idx = szt->nr_physical_zones;
-		args->next_sector = get_capacity(szt->dev->bdev->bd_disk);
-		return 0;
-	}
+	unsigned logical_zone_id = num / STRIPE_SIZE;
 
 	/*
 	 * XXX: Should get entire lock to prevent zones from updating wp during
 	 * the report zone routine.
 	 */
 	r0zone_init_or_update_zone(blkz, num, szt);
+
+	args->zone_idx++;
+	args->next_sector = blkz->start + blkz->len;
 
 	if ((num % STRIPE_SIZE) < (STRIPE_SIZE - 1))
 		return 0;
@@ -305,21 +297,12 @@ static int r0zone_report_zones_cb(struct blk_zone *blkz, unsigned int num,
 		blkz->wp += zone->_wp - zone->_start;
 	}
 
-	blkz->start = args->zone_idx * STRIPE_SIZE * szt->zone_size;
+	blkz->start = logical_zone_id * STRIPE_SIZE * szt->zone_size;
 	blkz->wp += blkz->start;
 	blkz->len = szt->zone_size * STRIPE_SIZE;
 	blkz->capacity = szt->zone_capacity * STRIPE_SIZE;
-	args->next_sector = blkz->start + blkz->len;
 
-	if (num == last_physical_zone_id) {
-		zone_idx = args->zone_idx;
-
-		args->zone_idx = szt->nr_physical_zones;
-		args->next_sector = get_capacity(szt->dev->bdev->bd_disk);
-
-		return args->orig_cb(blkz, zone_idx, args->orig_data);
-	}
-	return args->orig_cb(blkz, args->zone_idx++, args->orig_data);
+	return args->orig_cb(blkz, logical_zone_id, args->orig_data);
 }
 
 static int r0zone_report_zones(struct dm_target *ti,
@@ -327,10 +310,8 @@ static int r0zone_report_zones(struct dm_target *ti,
 {
 	struct r0zone_target *szt  = ti->private;
 
-	args->start = szt->start;
-
 	return blkdev_report_zones(szt->dev->bdev,
-			0, nr_zones, r0zone_report_zones_cb, args);
+			args->start, nr_zones, r0zone_report_zones_cb, args);
 }
 
 static int r0zone_init_metadata(struct r0zone_target *szt)
