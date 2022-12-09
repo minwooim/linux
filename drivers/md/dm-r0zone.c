@@ -97,19 +97,10 @@ static inline sector_t l2p_sect(struct r0zone_target *target, sector_t sector)
 	 *    8     9     ...		row=2
 	 * col=0 col=1 col=2 col=3
 	 */
-	// chunk id 는 구해올 수 있지만, 128k 로 나눠떨어지지 않을 수 있음.
 	int chunk = loffset / target->chunk_size_sectors;
 	sector_t remain = loffset % target->chunk_size_sectors;
 	int row = chunk / STRIPE_SIZE;
 	int col = chunk & (STRIPE_SIZE - 1);
-
-	/*
-	pr_err("sector=%lld / lstart=%lld, loffset=%lld, pstart=%lld(%lld), "
-			"chunk=%d, remain=%lld, row=%d, col=%d\n",
-			sector, lstart, loffset, pstart, pstart / target->zone_size,
-			chunk,
-			remain, row, col);
-	*/
 
 	return pstart + (col * target->zone_size) +
 		(row * target->chunk_size_sectors) + remain;
@@ -251,6 +242,13 @@ static int r0zone_report_zones_cb(struct blk_zone *blkz, unsigned int num,
 	}
 
 	blkz->start = logical_zone_id * szt->lzone_size;
+	if (!blkz->wp)
+		blkz->cond = BLK_ZONE_COND_EMPTY;
+	else if (blkz->wp < szt->lzone_size)
+		blkz->cond = BLK_ZONE_COND_IMP_OPEN;
+	else
+		blkz->cond = BLK_ZONE_COND_FULL;
+
 	blkz->wp += blkz->start;
 	blkz->len = szt->lzone_size;
 	blkz->capacity = szt->lzone_capacity;
