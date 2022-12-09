@@ -115,6 +115,12 @@ static inline sector_t l2p_sect(struct r0zone_target *target, sector_t sector)
 		(row * target->chunk_size_sectors) + remain;
 }
 
+static inline unsigned int sector_to_zone(struct r0zone_target *target,
+		sector_t sector)
+{
+	return sector / target->zone_size;
+}
+
 static inline sector_t p2l_sect(struct r0zone_target *target, sector_t sector)
 {
 	sector_t lsize = target->zone_size * STRIPE_SIZE;
@@ -176,6 +182,14 @@ static inline struct r0zone_tio *clone_to_tio(struct bio *clone)
 	return container_of(clone, struct r0zone_tio, clone);
 }
 
+static void r0zone_update_zone_wp(struct r0zone_target *szt, struct bio *bio)
+{
+	unsigned int zone_id = sector_to_zone(szt, bio->bi_iter.bi_sector);
+	struct r0zone_zone *zone = xa_load(&szt->metadata->zones, zone_id);
+
+	zone->_wp += bio->bi_iter.bi_size >> SECTOR_SHIFT;
+}
+
 static void r0zone_submit_bio(struct r0zone_target *szt, struct bio *bio)
 {
 	BUG_ON(bio_sectors(bio) > szt->chunk_size_sectors);
@@ -185,6 +199,9 @@ static void r0zone_submit_bio(struct r0zone_target *szt, struct bio *bio)
 	 */
 	bio->bi_iter.bi_sector = l2p_sect(szt, bio->bi_iter.bi_sector);
 	submit_bio_noacct(bio);
+
+	if (bio_op(bio) == REQ_OP_WRITE)
+		r0zone_update_zone_wp(szt, bio);
 }
 
 static void r0zone_split_bio(struct r0zone_target *szt, struct bio *bio,
