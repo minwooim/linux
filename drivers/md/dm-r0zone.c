@@ -280,8 +280,10 @@ static int r0zone_report_zones_cb(struct blk_zone *blkz, unsigned int num,
 	unsigned int physical_zone_id = logical_zone_id * STRIPE_SIZE;
 	int i;
 
-	if (logical_zone_id >= szt->nr_physical_zones / STRIPE_SIZE)
+	if (logical_zone_id >= szt->nr_physical_zones / STRIPE_SIZE) {
+		args->next_sector = get_capacity(szt->dev->bdev->bd_disk);
 		return 0;
+	}
 
 	blkz->wp = 0;
 	for (i = 0; i < STRIPE_SIZE; i++) {
