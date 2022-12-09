@@ -4,6 +4,8 @@
 #include <linux/bio.h>
 #include <linux/device-mapper.h>
 
+#include "dm-core.h"
+
 #define KB	(1024)
 
 #define STRIPE_SIZE		(4)  /* Should be in power of 2 */
@@ -265,44 +267,35 @@ update:
 	return 0;
 }
 
+/*
+ * `num` is given as a logical zone number.
+ */
 static int r0zone_report_zones_cb(struct blk_zone *blkz, unsigned int num,
 		void *data)
 {
 	struct dm_report_zones_args *args = data;
 	struct r0zone_target *szt = args->tgt->private;
 	struct r0zone_metadata *meta = szt->metadata;
+	unsigned logical_zone_id = num * STRIPE_SIZE;
 	int i;
-	unsigned int last_physical_zone_id =
-		rounddown(szt->nr_physical_zones, STRIPE_SIZE) - 1;
-	unsigned logical_zone_id = num / STRIPE_SIZE;
 
-	/*
-	 * XXX: Should get entire lock to prevent zones from updating wp during
-	 * the report zone routine.
-	 */
-	r0zone_init_or_update_zone(blkz, num, szt);
-
-	args->zone_idx++;
-	args->next_sector = blkz->start + blkz->len;
-
-	if ((num % STRIPE_SIZE) < (STRIPE_SIZE - 1))
-		return 0;
-
-	/*
-	 * num == 0, (STRIPE_SIZE - 1) * 1, (STRIPE_SIZE - 1) * 2, ...
-	 */
 	blkz->wp -= blkz->start;
-	for (i = 1; i < STRIPE_SIZE; i++) {
-		struct r0zone_zone *zone = xa_load(&meta->zones, num - i);
+	for (i = 0; i < STRIPE_SIZE; i++) {
+		struct r0zone_zone *zone = xa_load(&meta->zones,
+				logical_zone_id + i);
+		if (!zone)
+			return 0;
 		blkz->wp += zone->_wp - zone->_start;
 	}
 
 	blkz->start = logical_zone_id * STRIPE_SIZE * szt->zone_size;
 	blkz->wp += blkz->start;
-	blkz->len = szt->zone_size * STRIPE_SIZE;
-	blkz->capacity = szt->zone_capacity * STRIPE_SIZE;
+	blkz->len = szt->lzone_size;
+	blkz->capacity = szt->lzone_capacity;
 
-	return args->orig_cb(blkz, logical_zone_id, args->orig_data);
+	args->next_sector = blkz->start + blkz->len;
+
+	return args->orig_cb(blkz, args->zone_idx++, args->orig_data);
 }
 
 static int r0zone_report_zones(struct dm_target *ti,
@@ -347,16 +340,23 @@ static int r0zone_init_metadata(struct r0zone_target *szt)
 static void r0zone_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct r0zone_target *szt = ti->private;
-	sector_t zone_sectors = bdev_zone_sectors(szt->dev->bdev);
 
 	/*
-	 * XXX: should update queue limits here, but number of zones are not
-	 * consistent over the lifetime....
+	 * XXX: if we update chunk_sectors here,
+	 * validate_hardware_zoned_model() will fail due to difference between
+	 * the physical zone size and the logical one.  So, we commented the
+	 * error check part in that function.
 	 */
-	/*
-	limits->chunk_sectors = zone_sectors * STRIPE_SIZE;
-	limits->max_sectors = zone_sectors * STRIPE_SIZE;
-	*/
+	limits->chunk_sectors = szt->lzone_size;
+	limits->max_sectors = szt->lzone_size;
+}
+
+static void r0zone_update_chunk_sectors(struct dm_target *ti)
+{
+	struct r0zone_target *szt = (struct r0zone_target *) ti->private;
+	struct mapped_device *md = dm_table_get_md(ti->table);
+
+	md->queue->limits.chunk_sectors = szt->lzone_size;
 }
 
 static int r0zone_ctr(struct dm_target *ti, unsigned int argc,
@@ -400,6 +400,7 @@ static int r0zone_ctr(struct dm_target *ti, unsigned int argc,
         ti->private = szt;
 
 	r0zone_init_metadata(szt);
+	r0zone_update_chunk_sectors(ti);
 
 	pr_info("dm-strzone: %s: chunk_size=%u bytes, zone_size=%lld bytes, zone_capacity=%lld bytes\n", szt->dev->name, chunk_size,
 			szt->zone_size << SECTOR_SHIFT,
