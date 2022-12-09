@@ -276,24 +276,23 @@ static int r0zone_report_zones_cb(struct blk_zone *blkz, unsigned int num,
 	struct dm_report_zones_args *args = data;
 	struct r0zone_target *szt = args->tgt->private;
 	struct r0zone_metadata *meta = szt->metadata;
-	unsigned logical_zone_id = num * STRIPE_SIZE;
+	unsigned int logical_zone_id = num + (args->start / szt->zone_size);
+	unsigned int physical_zone_id = logical_zone_id * STRIPE_SIZE;
 	int i;
 
-	blkz->wp -= blkz->start;
+	blkz->wp = 0;
 	for (i = 0; i < STRIPE_SIZE; i++) {
 		struct r0zone_zone *zone = xa_load(&meta->zones,
-				logical_zone_id + i);
+				physical_zone_id + i);
 		if (!zone)
 			return 0;
 		blkz->wp += zone->_wp - zone->_start;
 	}
 
-	blkz->start = logical_zone_id * STRIPE_SIZE * szt->zone_size;
+	blkz->start = logical_zone_id * szt->lzone_size;
 	blkz->wp += blkz->start;
 	blkz->len = szt->lzone_size;
 	blkz->capacity = szt->lzone_capacity;
-
-	args->next_sector = blkz->start + blkz->len;
 
 	return args->orig_cb(blkz, args->zone_idx++, args->orig_data);
 }
@@ -302,6 +301,8 @@ static int r0zone_report_zones(struct dm_target *ti,
 		struct dm_report_zones_args *args, unsigned int nr_zones)
 {
 	struct r0zone_target *szt  = ti->private;
+
+	args->start = args->next_sector / STRIPE_SIZE;
 
 	return blkdev_report_zones(szt->dev->bdev,
 			args->start, nr_zones, r0zone_report_zones_cb, args);
