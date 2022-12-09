@@ -223,10 +223,10 @@ static int r0zone_rw(struct r0zone_target *szt, struct bio *bio)
 	/*
 	 * Round down the very first bio aligned to the chunk size.
 	 */
-	_start = round_down(start << SECTOR_SHIFT, chunk_size) >>
+	_start = round_up(start << SECTOR_SHIFT, chunk_size) >>
 			SECTOR_SHIFT;
-	if (start != _start && start - _start < bio_sectors(bio))
-		r0zone_split_bio(szt, bio, start - _start);
+	if (start != _start && _start - start < bio_sectors(bio))
+		r0zone_split_bio(szt, bio, _start - start);
 
 	while (bio->bi_iter.bi_size > chunk_size)
 		r0zone_split_bio(szt, bio, szt->chunk_size_sectors);
