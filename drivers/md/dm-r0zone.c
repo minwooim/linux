@@ -121,67 +121,6 @@ static inline unsigned int sector_to_zone(struct r0zone_target *target,
 	return sector / target->zone_size;
 }
 
-static inline sector_t p2l_sect(struct r0zone_target *target, sector_t sector)
-{
-	sector_t lsize = target->zone_size * STRIPE_SIZE;
-	sector_t pstart = sector / lsize * STRIPE_SIZE;
-
-	int row = (sector - pstart) / target->chunk_size_sectors;
-	int col = (sector - pstart) % target->chunk_size_sectors;
-
-	return pstart + (row * STRIPE_SIZE + col) * target->chunk_size_sectors;
-}
-
-static inline const char *bio_op_name(struct bio *bio)
-{
-	switch (bio_op(bio)) {
-	case REQ_OP_READ:
-		return "READ";
-	case REQ_OP_WRITE:
-		return "WRITE";
-	case REQ_OP_ZONE_APPEND:
-		return "ZONE APPEND";
-	default:
-		return "UNKNOWN";
-	}
-}
-
-static inline u64 zone_to_lba(struct r0zone_zone *zone)
-{
-	struct r0zone_target *szt = zone->szt;
-
-	return (zone->id * to_bytes(szt->zone_size)) >> szt->zone_size_shift;
-}
-
-static inline u64 sector_to_lba(struct r0zone_target *szt, sector_t sector)
-{
-	return (sector << SECTOR_SHIFT) >> ilog2(szt->logical_block_size);
-}
-
-static inline u64 lba_to_sector(struct r0zone_target *szt, u64 lba)
-{
-	return to_sector(lba << ilog2(szt->logical_block_size));
-}
-
-static inline u64 sector_to_nlb(struct r0zone_target *szt, sector_t sector)
-{
-	return DIV_ROUND_UP(sector << SECTOR_SHIFT, szt->logical_block_size);
-}
-
-static inline sector_t zone_remaining_sectors(struct r0zone_zone *zone)
-{
-	struct r0zone_target *szt = zone->szt;
-	sector_t used = lba_to_sector(szt, zone->wp) -
-		lba_to_sector(szt, zone->slba);
-
-	return szt->zone_capacity - used;
-}
-
-static inline struct r0zone_tio *clone_to_tio(struct bio *clone)
-{
-	return container_of(clone, struct r0zone_tio, clone);
-}
-
 static void r0zone_update_zone_wp(struct r0zone_target *szt, struct bio *bio)
 {
 	unsigned int zone_id = sector_to_zone(szt, bio->bi_iter.bi_sector);
