@@ -166,6 +166,27 @@ static int r0zone_rw(struct r0zone_target *szt, struct bio *bio)
 	return DM_MAPIO_SUBMITTED;
 }
 
+static int r0zone_zone_reset(struct r0zone_target *szt, struct bio *bio)
+{
+	sector_t start = bio->bi_iter.bi_sector;
+	int i;
+
+	for (i = 1; i < STRIPE_SIZE; i++) {
+		struct bio *clone = bio_alloc_clone(NULL, bio, GFP_NOIO,
+				&szt->bio_set);
+
+		bio_set_dev(clone, szt->dev->bdev);
+		clone->bi_iter.bi_sector =
+			l2p_sect(szt, start) + i * szt->zone_size,
+		submit_bio(clone);
+	}
+
+	bio_set_dev(bio, szt->dev->bdev);
+	bio->bi_iter.bi_sector = l2p_sect(szt, start);
+	submit_bio(bio);
+	return DM_MAPIO_SUBMITTED;
+}
+
 static int r0zone_map(struct dm_target *ti, struct bio *bio)
 {
         struct r0zone_target *szt = (struct r0zone_target *) ti->private;
@@ -174,8 +195,10 @@ static int r0zone_map(struct dm_target *ti, struct bio *bio)
 	case REQ_OP_READ:
 	case REQ_OP_WRITE:
 		return r0zone_rw(szt, bio);
+	case REQ_OP_ZONE_RESET:
+		return r0zone_zone_reset(szt, bio);
 	default:
-		pr_err("invalid operation of bio\n");
+		pr_err("invalid operation of bio %d\n", bio_op(bio));
 		return -EINVAL;
 	}
 }
