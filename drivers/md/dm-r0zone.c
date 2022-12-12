@@ -120,6 +120,14 @@ static void r0zone_update_zone_wp(struct r0zone_target *szt, struct bio *bio)
 	zone->_wp += bio->bi_iter.bi_size >> SECTOR_SHIFT;
 }
 
+static void r0zone_reset_zone_wp(struct r0zone_target *szt, struct bio *bio)
+{
+	unsigned int zone_id = sector_to_zone(szt, bio->bi_iter.bi_sector);
+	struct r0zone_zone *zone = xa_load(&szt->metadata->zones, zone_id);
+
+	zone->_wp = zone->_start;
+}
+
 static void r0zone_submit_bio(struct r0zone_target *szt, struct bio *bio)
 {
 	BUG_ON(bio_sectors(bio) > szt->chunk_size_sectors);
@@ -177,12 +185,14 @@ static int r0zone_zone_reset(struct r0zone_target *szt, struct bio *bio)
 
 		bio_set_dev(clone, szt->dev->bdev);
 		clone->bi_iter.bi_sector =
-			l2p_sect(szt, start) + i * szt->zone_size,
+			l2p_sect(szt, start) + i * szt->zone_size;
+		r0zone_reset_zone_wp(szt, clone);
 		submit_bio(clone);
 	}
 
 	bio_set_dev(bio, szt->dev->bdev);
 	bio->bi_iter.bi_sector = l2p_sect(szt, start);
+	r0zone_reset_zone_wp(szt, bio);
 	submit_bio(bio);
 	return DM_MAPIO_SUBMITTED;
 }
@@ -267,7 +277,7 @@ static int r0zone_report_zones_cb(struct blk_zone *blkz, unsigned int num,
 	blkz->start = logical_zone_id * szt->lzone_size;
 	if (!blkz->wp)
 		blkz->cond = BLK_ZONE_COND_EMPTY;
-	else if (blkz->wp < szt->lzone_size)
+	else if (blkz->wp < szt->lzone_capacity)
 		blkz->cond = BLK_ZONE_COND_IMP_OPEN;
 	else
 		blkz->cond = BLK_ZONE_COND_FULL;
