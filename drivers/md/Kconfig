@@ -654,6 +654,14 @@ config DM_ZONED
 
 	  If unsure, say N.
 
+config DM_R0ZONE
+	tristate "RAID-0 Zoned block device"
+	depends on BLK_DEV_DM
+	depends on BLK_DEV_ZONED
+	help
+	  Small-zone ZNS can be configured to a large zone by striping out
+	  the small zones to a large zone.
+
 config DM_AUDIT
 	bool "DM audit events"
 	depends on AUDIT

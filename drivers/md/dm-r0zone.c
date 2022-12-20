@@ -8,9 +8,11 @@
 
 #define KB	(1024)
 
-#define STRIPE_SIZE		(4)  /* Should be in power of 2 */
 /* XXX: it should be retrived from the controller by an admin command */
 #define OPTIMAL_WRITE_SIZE	(128 * KB)
+
+static unsigned int stripe_size = 4;
+module_param(stripe_size, uint, 0644);
 
 /*
  * Must be power-of-2 and larger than 4KB.
@@ -84,10 +86,10 @@ static inline sector_t l2p_sect(struct r0zone_target *target, sector_t sector)
 {
 	int lstart = sector / target->lzone_size;
 	sector_t loffset = sector - (lstart * target->lzone_size);
-	sector_t pstart = lstart * STRIPE_SIZE * target->zone_size;
+	sector_t pstart = lstart * stripe_size * target->zone_size;
 
 	/*
-	 * Example of chunk mapping for (STRIPE_SIZE = 4)
+	 * Example of chunk mapping for (stripe_size = 4)
 	 *
 	 * |---------------------|	logical zone
 	 *
@@ -99,8 +101,8 @@ static inline sector_t l2p_sect(struct r0zone_target *target, sector_t sector)
 	 */
 	int chunk = loffset / target->chunk_size_sectors;
 	sector_t remain = loffset % target->chunk_size_sectors;
-	int row = chunk / STRIPE_SIZE;
-	int col = chunk & (STRIPE_SIZE - 1);
+	int row = chunk / stripe_size;
+	int col = chunk & (stripe_size - 1);
 
 	return pstart + (col * target->zone_size) +
 		(row * target->chunk_size_sectors) + remain;
@@ -179,7 +181,7 @@ static int r0zone_zone_reset(struct r0zone_target *szt, struct bio *bio)
 	sector_t start = bio->bi_iter.bi_sector;
 	int i;
 
-	for (i = 1; i < STRIPE_SIZE; i++) {
+	for (i = 1; i < stripe_size; i++) {
 		struct bio *clone = bio_alloc_clone(NULL, bio, GFP_NOIO,
 				&szt->bio_set);
 
@@ -239,7 +241,7 @@ static int r0zone_init_or_update_zone(struct blk_zone *blkz, unsigned int num,
 	zone->szt = szt;
 	zone->_start = blkz->start;
 	szt->zone_capacity = blkz->capacity;
-	szt->lzone_capacity = szt->zone_capacity * STRIPE_SIZE;
+	szt->lzone_capacity = szt->zone_capacity * stripe_size;
 
 update:
 	zone->wp = (blkz->wp<< SECTOR_SHIFT) >> ilog2(szt->logical_block_size);
@@ -257,16 +259,16 @@ static int r0zone_report_zones_cb(struct blk_zone *blkz, unsigned int num,
 	struct r0zone_target *szt = args->tgt->private;
 	struct r0zone_metadata *meta = szt->metadata;
 	unsigned int logical_zone_id = num + (args->start / szt->zone_size);
-	unsigned int physical_zone_id = logical_zone_id * STRIPE_SIZE;
+	unsigned int physical_zone_id = logical_zone_id * stripe_size;
 	int i;
 
-	if (logical_zone_id >= szt->nr_physical_zones / STRIPE_SIZE) {
+	if (logical_zone_id >= szt->nr_physical_zones / stripe_size) {
 		args->next_sector = get_capacity(szt->dev->bdev->bd_disk);
 		return 0;
 	}
 
 	blkz->wp = 0;
-	for (i = 0; i < STRIPE_SIZE; i++) {
+	for (i = 0; i < stripe_size; i++) {
 		struct r0zone_zone *zone = xa_load(&meta->zones,
 				physical_zone_id + i);
 		if (!zone)
@@ -294,7 +296,7 @@ static int r0zone_report_zones(struct dm_target *ti,
 {
 	struct r0zone_target *szt  = ti->private;
 
-	args->start = args->next_sector / STRIPE_SIZE;
+	args->start = args->next_sector / stripe_size;
 
 	return blkdev_report_zones(szt->dev->bdev,
 			args->start, nr_zones, r0zone_report_zones_cb, args);
@@ -377,7 +379,7 @@ static int r0zone_ctr(struct dm_target *ti, unsigned int argc,
 		pr_err("%s: Invalid chunk_sectors 0\n", "strzone");
 		goto out;
 	}
-	szt->lzone_size = szt->zone_size * STRIPE_SIZE;
+	szt->lzone_size = szt->zone_size * stripe_size;
 	szt->zone_size_shift = ilog2(szt->zone_size);
 	szt->nr_physical_zones = disk_nr_zones(szt->dev->bdev->bd_disk);
 

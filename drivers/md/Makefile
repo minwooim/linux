@@ -3,7 +3,7 @@
 # Makefile for the kernel software RAID and LVM drivers.
 #
 
-obj-y		+= dm-r0zone.o
+obj-$(CONFIG_DM_R0ZONE)		+= dm-r0zone.o
 
 dm-mod-y	+= dm.o dm-table.o dm-target.o dm-linear.o dm-stripe.o \
 		   dm-ioctl.o dm-io.o dm-kcopyd.o dm-sysfs.o dm-stats.o \
