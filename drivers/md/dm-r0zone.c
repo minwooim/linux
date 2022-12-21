@@ -288,6 +288,8 @@ static int r0zone_report_zones_cb(struct blk_zone *blkz, unsigned int num,
 	blkz->len = szt->lzone_size;
 	blkz->capacity = szt->lzone_capacity;
 
+	args->next_sector = blkz->start + blkz->len;
+
 	return args->orig_cb(blkz, args->zone_idx++, args->orig_data);
 }
 
