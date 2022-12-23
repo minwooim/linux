@@ -166,6 +166,11 @@ static void r0zone_split_endio(struct bio *bio)
 	r0zone_dec_pending(io);
 }
 
+static void r0zone_clone_endio(struct bio *bio)
+{
+	bio_put(bio);
+}
+
 static void r0zone_split_bio(struct r0zone_target *szt, struct r0zone_io *io,
 		sector_t size, unsigned int bio_idx)
 {
@@ -281,9 +286,11 @@ static int r0zone_zone_reset(struct r0zone_target *szt, struct bio *bio)
 		struct bio *clone = bio_alloc_clone(NULL, bio, GFP_NOIO,
 				&szt->bio_set);
 
-		bio_set_dev(clone, szt->dev->bdev);
+		clone->bi_end_io = r0zone_clone_endio;
 		clone->bi_iter.bi_sector =
 			l2p_sect(szt, start) + i * szt->zone_size;
+		bio_set_dev(clone, szt->dev->bdev);
+
 		r0zone_reset_zone_wp(szt, clone);
 		submit_bio(clone);
 	}
