@@ -146,13 +146,7 @@ static void r0zone_submit_bio(struct r0zone_target *szt, struct bio *bio)
 
 static void r0zone_bio_endio(struct r0zone_io *io)
 {
-	int i;
-
-	for (i = 0; i < io->nr_split_bios; i++)
-		bio_put(io->clone[i]);
-
 	bio_endio(io->parent);
-
 	kfree(io->clone);
 	kfree(io);
 }
@@ -168,6 +162,7 @@ static void r0zone_split_endio(struct bio *bio)
 	struct r0zone_tio *tio = container_of(bio, struct r0zone_tio, clone);
 	struct r0zone_io *io = tio->io;
 
+	bio_put(bio);
 	r0zone_dec_pending(io);
 }
 
