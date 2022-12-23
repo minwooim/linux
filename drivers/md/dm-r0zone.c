@@ -54,11 +54,12 @@ struct r0zone_target {
 };
 
 struct r0zone_io {
+	struct bio *bio;
+	struct bio *parent;
 	struct r0zone_target *szt;
+	unsigned int nr_split_bios;
 	atomic_t io_count;
-	struct bio *orig_bio;
 
-	unsigned int stripe_count;
 	struct bio **clone;
 };
 
@@ -144,35 +145,139 @@ static void r0zone_submit_bio(struct r0zone_target *szt, struct bio *bio)
 		r0zone_update_zone_wp(szt, bio);
 }
 
-static void r0zone_split_bio(struct r0zone_target *szt, struct bio *bio,
-		sector_t size)
+static void r0zone_bio_endio(struct r0zone_io *io)
 {
-	struct bio *split = bio_split(bio, size, GFP_NOIO,
+	int i;
+
+	for (i = 0; i < io->nr_split_bios; i++)
+		bio_put(io->clone[i]);
+
+	bio_endio(io->bio);
+	bio_advance(io->parent, io->parent->bi_iter.bi_size);
+	bio_endio(io->parent);
+	kfree(io);
+}
+
+static void r0zone_dec_pending(struct r0zone_io *io)
+{
+	if (atomic_dec_and_test(&io->io_count))
+		r0zone_bio_endio(io);
+}
+
+static void r0zone_split_endio(struct bio *bio)
+{
+	struct r0zone_tio *tio = container_of(bio, struct r0zone_tio, clone);
+	struct r0zone_io *io = tio->io;
+
+	r0zone_dec_pending(io);
+}
+
+static void r0zone_split_bio(struct r0zone_target *szt, struct r0zone_io *io,
+		sector_t size, unsigned int bio_idx)
+{
+	struct bio *split = bio_alloc_clone(NULL, io->bio, GFP_NOIO,
 			&szt->bio_set);
-	bio_chain(split, bio);
+	struct r0zone_tio *tio;
+
+	if (!split)
+		return;
+
+	split->bi_end_io = r0zone_split_endio;
+	split->bi_iter.bi_size = size << SECTOR_SHIFT;
+	bio_set_dev(split, szt->dev->bdev);
+
+	tio = container_of(split, struct r0zone_tio, clone);
+	tio->io = io;
+	io->clone[bio_idx] = split;
+	atomic_inc(&io->io_count);
+
+	if (bio_sectors(split) < bio_sectors(io->bio))
+		bio_advance(io->bio, size << SECTOR_SHIFT);
+
 	r0zone_submit_bio(szt, split);
+}
+
+static unsigned int r0zone_nr_split_bios(struct bio *bio)
+{
+	unsigned int nr_split_bios = 0;
+	sector_t start = bio->bi_iter.bi_sector;
+	sector_t _start;
+	unsigned int bi_size = bio->bi_iter.bi_size;
+
+	_start = round_up(start << SECTOR_SHIFT, chunk_size) >>
+			SECTOR_SHIFT;
+	if (start != _start && _start - start < (bi_size >> 9)) {
+		nr_split_bios++;
+		bi_size -= (_start - start) << 9;
+	}
+
+	while (bi_size > chunk_size) {
+		nr_split_bios++;
+		bi_size -= chunk_size;
+	}
+
+	if (bi_size)
+		nr_split_bios++;
+	return nr_split_bios;
 }
 
 static int r0zone_rw(struct r0zone_target *szt, struct bio *bio)
 {
 	sector_t start = bio->bi_iter.bi_sector;
 	sector_t _start;
+	struct r0zone_io *io;
+	unsigned int bio_idx = 0;
+	struct bio *orig_bio;
+	struct r0zone_tio *tio;
 
-	bio_set_dev(bio, szt->dev->bdev);
+	if (r0zone_nr_split_bios(bio) < 2) {
+		bio_set_dev(bio, szt->dev->bdev);
+		r0zone_submit_bio(szt, bio);
+		return DM_MAPIO_SUBMITTED;
+	}
+
+	io = kzalloc(sizeof(struct r0zone_io), GFP_KERNEL);
+	if (!io)
+		return -ENOMEM;
+
+	orig_bio = bio_alloc_clone(NULL, bio, GFP_NOIO, &szt->bio_set);
+	bio_set_dev(orig_bio, szt->dev->bdev);
+
+	atomic_set(&io->io_count, 0);
+	io->nr_split_bios = r0zone_nr_split_bios(bio);
+	io->szt = szt;
+	io->parent = bio;
+	io->bio = orig_bio;
+	io->clone = kmalloc(sizeof(struct bio *) * io->nr_split_bios,
+			GFP_KERNEL);
+	if (!io->clone)
+		return -ENOMEM;
 
 	/*
 	 * Round down the very first bio aligned to the chunk size.
 	 */
 	_start = round_up(start << SECTOR_SHIFT, chunk_size) >>
 			SECTOR_SHIFT;
-	if (start != _start && _start - start < bio_sectors(bio))
-		r0zone_split_bio(szt, bio, _start - start);
+	if (start != _start && _start - start < bio_sectors(io->bio))
+		r0zone_split_bio(szt, io, _start - start, bio_idx++);
 
-	while (bio->bi_iter.bi_size > chunk_size)
-		r0zone_split_bio(szt, bio, szt->chunk_size_sectors);
+	while (io->bio->bi_iter.bi_size > chunk_size)
+		r0zone_split_bio(szt, io, szt->chunk_size_sectors, bio_idx++);
 
+	if (bio_sectors(io->bio)) {
+		struct bio *last_bio = bio_alloc_clone(NULL, io->bio, GFP_NOIO,
+				&szt->bio_set);
 
-	r0zone_submit_bio(szt, bio);
+		bio_set_dev(last_bio, szt->dev->bdev);
+		last_bio->bi_end_io = r0zone_split_endio;
+		tio = container_of(last_bio, struct r0zone_tio, clone);
+		tio->io = io;
+		io->clone[bio_idx++] = last_bio;
+		atomic_inc(&io->io_count);
+
+		r0zone_submit_bio(szt, last_bio);
+	}
+
 	return DM_MAPIO_SUBMITTED;
 }
 
