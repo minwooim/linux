@@ -54,7 +54,6 @@ struct r0zone_target {
 };
 
 struct r0zone_io {
-	struct bio *bio;
 	struct bio *parent;
 	struct r0zone_target *szt;
 	unsigned int nr_split_bios;
@@ -152,9 +151,9 @@ static void r0zone_bio_endio(struct r0zone_io *io)
 	for (i = 0; i < io->nr_split_bios; i++)
 		bio_put(io->clone[i]);
 
-	bio_endio(io->bio);
-	bio_advance(io->parent, io->parent->bi_iter.bi_size);
 	bio_endio(io->parent);
+
+	kfree(io->clone);
 	kfree(io);
 }
 
@@ -175,7 +174,7 @@ static void r0zone_split_endio(struct bio *bio)
 static void r0zone_split_bio(struct r0zone_target *szt, struct r0zone_io *io,
 		sector_t size, unsigned int bio_idx)
 {
-	struct bio *split = bio_alloc_clone(NULL, io->bio, GFP_NOIO,
+	struct bio *split = bio_alloc_clone(NULL, io->parent, GFP_NOIO,
 			&szt->bio_set);
 	struct r0zone_tio *tio;
 
@@ -191,8 +190,8 @@ static void r0zone_split_bio(struct r0zone_target *szt, struct r0zone_io *io,
 	io->clone[bio_idx] = split;
 	atomic_inc(&io->io_count);
 
-	if (bio_sectors(split) < bio_sectors(io->bio))
-		bio_advance(io->bio, size << SECTOR_SHIFT);
+	if (bio_sectors(split) < bio_sectors(io->parent))
+		bio_advance(io->parent, size << SECTOR_SHIFT);
 
 	r0zone_submit_bio(szt, split);
 }
@@ -227,7 +226,6 @@ static int r0zone_rw(struct r0zone_target *szt, struct bio *bio)
 	sector_t _start;
 	struct r0zone_io *io;
 	unsigned int bio_idx = 0;
-	struct bio *orig_bio;
 	struct r0zone_tio *tio;
 
 	if (r0zone_nr_split_bios(bio) < 2) {
@@ -240,14 +238,12 @@ static int r0zone_rw(struct r0zone_target *szt, struct bio *bio)
 	if (!io)
 		return -ENOMEM;
 
-	orig_bio = bio_alloc_clone(NULL, bio, GFP_NOIO, &szt->bio_set);
-	bio_set_dev(orig_bio, szt->dev->bdev);
+	bio_set_dev(bio, szt->dev->bdev);
 
 	atomic_set(&io->io_count, 0);
 	io->nr_split_bios = r0zone_nr_split_bios(bio);
 	io->szt = szt;
 	io->parent = bio;
-	io->bio = orig_bio;
 	io->clone = kmalloc(sizeof(struct bio *) * io->nr_split_bios,
 			GFP_KERNEL);
 	if (!io->clone)
@@ -258,14 +254,14 @@ static int r0zone_rw(struct r0zone_target *szt, struct bio *bio)
 	 */
 	_start = round_up(start << SECTOR_SHIFT, chunk_size) >>
 			SECTOR_SHIFT;
-	if (start != _start && _start - start < bio_sectors(io->bio))
+	if (start != _start && _start - start < bio_sectors(bio))
 		r0zone_split_bio(szt, io, _start - start, bio_idx++);
 
-	while (io->bio->bi_iter.bi_size > chunk_size)
+	while (bio->bi_iter.bi_size > chunk_size)
 		r0zone_split_bio(szt, io, szt->chunk_size_sectors, bio_idx++);
 
-	if (bio_sectors(io->bio)) {
-		struct bio *last_bio = bio_alloc_clone(NULL, io->bio, GFP_NOIO,
+	if (bio_sectors(bio)) {
+		struct bio *last_bio = bio_alloc_clone(NULL, bio, GFP_NOIO,
 				&szt->bio_set);
 
 		bio_set_dev(last_bio, szt->dev->bdev);
