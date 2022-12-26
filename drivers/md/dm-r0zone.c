@@ -22,10 +22,6 @@ module_param(chunk_size, uint, 0644);
 
 struct r0zone_metadata {
 	struct xarray zones;
-
-	struct list_head free_zones_list;
-	struct list_head partial_zones_list;
-	struct list_head full_zones_list;
 };
 
 struct r0zone_target {
@@ -70,14 +66,6 @@ struct r0zone_tio {
 	(offsetof(struct r0zone_tio, clone))
 
 struct r0zone_zone {
-	struct r0zone_target *szt;
-	struct list_head list;
-
-	unsigned int id;
-	u64 slba;
-	u64 wp;
-
-	// based on sector size
 	sector_t _start;
 	sector_t _wp;
 };
@@ -338,16 +326,11 @@ static int r0zone_init_or_update_zone(struct blk_zone *blkz, unsigned int num,
 		return -ENOMEM;
 	}
 
-	zone->id = num;
-	zone->slba = (blkz->start << SECTOR_SHIFT) >>
-		ilog2(szt->logical_block_size);
-	zone->szt = szt;
 	zone->_start = blkz->start;
 	szt->zone_capacity = blkz->capacity;
 	szt->lzone_capacity = szt->zone_capacity * stripe_size;
 
 update:
-	zone->wp = (blkz->wp<< SECTOR_SHIFT) >> ilog2(szt->logical_block_size);
 	zone->_wp = blkz->wp;
 	return 0;
 }
@@ -417,10 +400,6 @@ static int r0zone_init_metadata(struct r0zone_target *szt)
 		return -ENOMEM;
 
 	szt->metadata = meta;
-
-	INIT_LIST_HEAD(&meta->free_zones_list);
-	INIT_LIST_HEAD(&meta->partial_zones_list);
-	INIT_LIST_HEAD(&meta->full_zones_list);
 
 	xa_init(&meta->zones);
 
@@ -494,7 +473,7 @@ static int r0zone_ctr(struct dm_target *ti, unsigned int argc,
 	szt->zone_capacity = 0;
 	szt->lzone_capacity = 0;
 	front_pad = __alignof__(struct r0zone_tio) + DM_STRZONE_TIO_BIO_OFFSET;
-	if (bioset_init(&szt->bio_set, 8192, front_pad, 0))
+	if (bioset_init(&szt->bio_set, 256, front_pad, 0))
 		goto out;
 
         ti->private = szt;
@@ -515,9 +494,18 @@ out:
 static void r0zone_dtr(struct dm_target *ti)
 {
         struct r0zone_target *szt = (struct r0zone_target *) ti->private;
+	unsigned long idx;
+	struct r0zone_zone *zone;
 
         dm_put_device(ti, szt->dev);
-        kfree(szt);
+
+	bioset_exit(&szt->bio_set);
+	xa_for_each(&szt->metadata->zones, idx, zone) {
+		kfree(zone);
+	}
+	xa_destroy(&szt->metadata->zones);
+	kfree(szt->metadata);
+	kfree(szt);
 }
 
 static int r0zone_iterate_devices(struct dm_target *ti,
