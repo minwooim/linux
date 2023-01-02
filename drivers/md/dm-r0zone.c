@@ -118,6 +118,14 @@ static void r0zone_reset_zone_wp(struct r0zone_target *szt, struct bio *bio)
 	zone->_wp = zone->_start;
 }
 
+static void r0zone_finish_zone_wp(struct r0zone_target *szt, struct bio *bio)
+{
+	unsigned int zone_id = sector_to_zone(szt, bio->bi_iter.bi_sector);
+	struct r0zone_zone *zone = xa_load(&szt->metadata->zones, zone_id);
+
+	zone->_wp = zone->_start + szt->zone_size;
+}
+
 static void r0zone_submit_bio(struct r0zone_target *szt, struct bio *bio)
 {
 	BUG_ON(bio_sectors(bio) > szt->chunk_size_sectors);
@@ -290,6 +298,31 @@ static int r0zone_zone_reset(struct r0zone_target *szt, struct bio *bio)
 	return DM_MAPIO_SUBMITTED;
 }
 
+static int r0zone_zone_finish(struct r0zone_target *szt, struct bio *bio)
+{
+	sector_t start = bio->bi_iter.bi_sector;
+	int i;
+
+	for (i = 1; i < stripe_size; i++) {
+		struct bio *clone = bio_alloc_clone(NULL, bio, GFP_NOIO,
+				&szt->bio_set);
+
+		clone->bi_end_io = r0zone_clone_endio;
+		clone->bi_iter.bi_sector =
+			l2p_sect(szt, start) + i * szt->zone_size;
+		bio_set_dev(clone, szt->dev->bdev);
+
+		r0zone_finish_zone_wp(szt, clone);
+		submit_bio(clone);
+	}
+
+	bio_set_dev(bio, szt->dev->bdev);
+	bio->bi_iter.bi_sector = l2p_sect(szt, start);
+	r0zone_finish_zone_wp(szt, bio);
+	submit_bio(bio);
+	return DM_MAPIO_SUBMITTED;
+}
+
 static int r0zone_map(struct dm_target *ti, struct bio *bio)
 {
         struct r0zone_target *szt = (struct r0zone_target *) ti->private;
@@ -300,6 +333,8 @@ static int r0zone_map(struct dm_target *ti, struct bio *bio)
 		return r0zone_rw(szt, bio);
 	case REQ_OP_ZONE_RESET:
 		return r0zone_zone_reset(szt, bio);
+	case REQ_OP_ZONE_FINISH:
+		return r0zone_zone_finish(szt, bio);
 	default:
 		pr_err("invalid operation of bio %d\n", bio_op(bio));
 		return -EINVAL;
