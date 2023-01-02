@@ -1784,6 +1784,9 @@ static int f2fs_issue_discard(struct f2fs_sb_info *sbi,
 	block_t i;
 	int err = 0;
 
+	trace_printk("secno, %d\n",
+			GET_SEC_FROM_SEG(sbi, GET_SEGNO(sbi, blkstart)));
+
 	bdev = f2fs_target_device(sbi, blkstart, NULL);
 
 	for (i = blkstart; i < blkstart + blklen; i++, len++) {
@@ -3344,6 +3347,10 @@ static void do_write_page(struct f2fs_summary *sum, struct f2fs_io_info *fio)
 reallocate:
 	f2fs_allocate_data_block(fio->sbi, fio->page, fio->old_blkaddr,
 			&fio->new_blkaddr, sum, type, fio);
+	trace_printk("old_blkaddr, %d, old_secno, %d, new_blkaddr, %d, new_secno, %d, io_type, %d\n",
+			fio->old_blkaddr, GET_SEC_FROM_SEG(fio-> sbi, GET_SEGNO(fio->sbi, fio->old_blkaddr)),
+			fio->new_blkaddr, GET_SEC_FROM_SEG(fio-> sbi, GET_SEGNO(fio->sbi, fio->new_blkaddr)),
+			fio->io_type);
 	if (GET_SEGNO(fio->sbi, fio->old_blkaddr) != NULL_SEGNO) {
 		invalidate_mapping_pages(META_MAPPING(fio->sbi),
 					fio->old_blkaddr, fio->old_blkaddr);

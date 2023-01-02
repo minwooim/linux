@@ -1470,6 +1470,9 @@ static int gc_data_segment(struct f2fs_sb_info *sbi, struct f2fs_summary *sum,
 	int submitted = 0;
 	unsigned int usable_blks_in_seg = f2fs_usable_blks_in_seg(sbi, segno);
 
+	trace_printk("secno, %d, gc_type, %d\n", GET_SEC_FROM_SEG(sbi, segno),
+			gc_type);
+
 	start_addr = START_BLOCK(sbi, segno);
 
 next_step:
