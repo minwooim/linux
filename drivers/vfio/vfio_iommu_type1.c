@@ -58,6 +58,14 @@ module_param_named(disable_hugepages,
 MODULE_PARM_DESC(disable_hugepages,
 		 "Disable VFIO IOMMU support for IOMMU hugepages.");
 
+static unsigned long force_map_pgsize;
+module_param_named(force_map_pgsize,
+		   force_map_pgsize, ulong, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(force_map_pgsize,
+		 "Force minimum IOVA mapping granularity in bytes "
+		 "(must be a power-of-2 multiple of PAGE_SIZE, e.g. 8192 for 8K). "
+		 "Userspace iova/vaddr/size must be aligned to this value.");
+
 struct vfio_iommu {
 	struct list_head	domain_list;
 	struct vfio_domain	*external_domain; /* domain for external user */
@@ -871,6 +879,24 @@ static unsigned long vfio_pgsize_bitmap(struct vfio_iommu *iommu)
 		bitmap |= PAGE_SIZE;
 	}
 
+	/*
+	 * If force_map_pgsize is set to a power-of-2 value >= PAGE_SIZE,
+	 * remove all page sizes smaller than the forced granularity and
+	 * ensure the forced size is present in the bitmap.  This makes
+	 * userspace align iova, vaddr and size to force_map_pgsize boundaries,
+	 * effectively enforcing a coarser IOVA mapping granularity (e.g. 8K)
+	 * even when the underlying physical page size is 4K.
+	 *
+	 * Note: the IOMMU hardware may still create multiple smaller PTEs
+	 * internally when the hardware pgsize_bitmap does not include
+	 * force_map_pgsize.  The enforcement is at the VFIO API boundary.
+	 */
+	if (force_map_pgsize && is_power_of_2(force_map_pgsize) &&
+	    force_map_pgsize >= PAGE_SIZE) {
+		bitmap &= ~(force_map_pgsize - 1);
+		bitmap |= force_map_pgsize;
+	}
+
 	return bitmap;
 }
 
@@ -1051,6 +1077,14 @@ static int vfio_pin_map_dma(struct vfio_iommu *iommu, struct vfio_dma *dma,
 	unsigned long pfn, limit = rlimit(RLIMIT_MEMLOCK) >> PAGE_SHIFT;
 	bool lock_cap = capable(CAP_IPC_LOCK);
 	int ret = 0;
+	/*
+	 * force_pages: number of 4K pages per forced mapping unit.
+	 * When force_map_pgsize=8192, force_pages=2 so every iommu_map()
+	 * call covers exactly 8K of IOVA space.  map_size is already
+	 * validated to be a multiple of force_map_pgsize by vfio_dma_do_map().
+	 */
+	long force_pages = (force_map_pgsize > PAGE_SIZE) ?
+			    (long)(force_map_pgsize >> PAGE_SHIFT) : 1;
 
 	while (size) {
 		/* Pin a contiguous chunk of memory */
@@ -1061,6 +1095,41 @@ static int vfio_pin_map_dma(struct vfio_iommu *iommu, struct vfio_dma *dma,
 			WARN_ON(!npage);
 			ret = (int)npage;
 			break;
+		}
+
+		/*
+		 * When a forced mapping granularity is active, only map
+		 * complete units (force_pages pages each).  Unpin any tail
+		 * pages that do not form a complete unit so they are re-pinned
+		 * on the next iteration together with their missing partners.
+		 * This keeps every iommu_map() call IOVA-aligned to the forced
+		 * granularity while still tolerating physically non-contiguous
+		 * memory (each unit may span multiple iommu_map() calls of
+		 * PAGE_SIZE when map_try_harder() is invoked).
+		 */
+		if (force_pages > 1 && (npage % force_pages)) {
+			long excess = npage % force_pages;
+			long usable = npage - excess;
+
+			if (usable == 0) {
+				/*
+				 * Could not pin enough consecutive pages to
+				 * fill even one forced-granularity unit.  Unpin
+				 * what we have and fail; the caller must supply
+				 * physically available memory in the required
+				 * alignment window.
+				 */
+				vfio_unpin_pages_remote(dma, iova + dma->size,
+							pfn, npage, true);
+				ret = -ENOBUFS;
+				break;
+			}
+			/* Unpin excess tail pages; re-visited next iteration. */
+			vfio_unpin_pages_remote(dma,
+						iova + dma->size +
+						(usable << PAGE_SHIFT),
+						pfn + usable, excess, true);
+			npage = usable;
 		}
 
 		/* Map it! */
